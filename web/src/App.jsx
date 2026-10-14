@@ -1,14 +1,14 @@
-// Muse Teams —— 主应用
+// Muse Teams —— 主应用（v3：进站直达工作台 + 公司管理）
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { api, getCompany, setCompany } from './api.js';
 import Sidebar from './components/Sidebar.jsx';
-import Landing from './components/Landing.jsx';
 import { PublishTaskModal, InviteModal, ArtifactModal } from './components/Modals.jsx';
 import LivingRoom from './tabs/LivingRoom.jsx';
 import Tasks from './tabs/Tasks.jsx';
 import Members from './tabs/Members.jsx';
 import Artifacts from './tabs/Artifacts.jsx';
 import Activity from './tabs/Activity.jsx';
+import Companies from './tabs/Companies.jsx';
 import { agentStatus } from './components/Creature.jsx';
 import { artIcon } from './components/Modals.jsx';
 import { deliverCelebration } from './anim.js';
@@ -16,7 +16,7 @@ import './animations.css';
 import './design.css';
 
 export default function App() {
-  const [tab, setTab] = useState('home');
+  const [tab, setTab] = useState(() => (getCompany() ? 'home' : 'companies'));
   const [company, setCompanyInfo] = useState(null); // {code, name} | null
   const [agents, setAgents] = useState([]);
   const [tasks, setTasks] = useState([]);
@@ -47,7 +47,7 @@ export default function App() {
     }
   }, [toast]);
 
-  // 启动时：有公司码则校验并进入，否则停在公司入口
+  // 启动时：有当前公司码则校验；无效则清空，仍留在工作台
   useEffect(() => {
     const c = getCompany();
     if (!c) return;
@@ -57,7 +57,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!company) return;
+    if (!company) {
+      setConnected(false);
+      setAgents([]); setTasks([]); setFeed([]);
+      return;
+    }
     refresh(false);
     const h = setInterval(() => refresh(true), 15000);
     return () => clearInterval(h);
@@ -66,6 +70,12 @@ export default function App() {
   const switchCompany = () => {
     setCompany('');
     setCompanyInfo(null);
+    setAgents([]); setTasks([]); setFeed([]); setConnected(false);
+    setTab('companies');
+  };
+
+  const onSelectCompany = (info) => {
+    setCompanyInfo(info);
     setAgents([]); setTasks([]); setFeed([]); setConnected(false);
   };
 
@@ -79,7 +89,6 @@ export default function App() {
     if (t) setArtView({ task: t, idx });
   };
 
-  // 任务 tab 通过验收后的庆祝（客厅不在前台时降级为普通刷新）
   const handleCelebrate = (taskId) => {
     const t = tasks.find((x) => x.id === taskId);
     const cel = t && t.owner
@@ -100,11 +109,12 @@ export default function App() {
     }
   };
 
+  const needCompanyHint = (
+    <div className="empty-hint">先在「公司」里创建或选择公司，再来这边看客厅 / 任务 / 成员</div>
+  );
 
   return (
     <>
-      {company ? (
-      <>
       <header className="topbar">
         <div className="logo">
           <div className="logo-mark serif">M</div>
@@ -113,11 +123,18 @@ export default function App() {
             <div className="logo-sub"><span className="mt-live-dot" />毛怪客厅 · live</div>
           </div>
         </div>
-        <div className="reg-pill" title="公司码：发给新成员入驻用">
-          🏢 {company.name} <code>{company.code}</code>
-          <button onClick={() => { try { navigator.clipboard.writeText(company.code); toast('公司码已复制 📋'); } catch (e) {} }}>复制码</button>
-          <button onClick={switchCompany} title="切换公司">切换</button>
-        </div>
+        {company ? (
+          <div className="reg-pill" title="公司码：发给新成员入驻用">
+            🏢 {company.name} <code>{company.code}</code>
+            <button onClick={() => { try { navigator.clipboard.writeText(company.code); toast('公司码已复制 📋'); } catch (e) {} }}>复制码</button>
+            <button onClick={switchCompany} title="切换公司">切换</button>
+          </div>
+        ) : (
+          <div className="reg-pill">
+            🏢 尚未选择公司
+            <button onClick={() => setTab('companies')}>去创建</button>
+          </div>
+        )}
         <div className="chips">
           <span className="chip">🛋️ 等候 <b>{online}</b></span>
           <span className="chip">✈️ 待领 <b>{pendingN}</b></span>
@@ -125,15 +142,29 @@ export default function App() {
           <span className={`chip${reviewN ? ' hot' : ''}`}>📦 交付 <b>{reviewN}</b></span>
         </div>
         <div className="top-actions">
-          <button className="btn btn-sm btn-ghost" onClick={() => setShowInvite(true)}>🚪 邀请</button>
-          <button className="btn btn-sm" onClick={() => setShowPublish(true)}>📤 发布任务</button>
+          <button className="btn btn-sm btn-ghost" onClick={() => setShowInvite(true)} disabled={!company}>🚪 邀请</button>
+          <button className="btn btn-sm" onClick={() => setShowPublish(true)} disabled={!company}>📤 发布任务</button>
         </div>
       </header>
 
       <div className="app-layout">
         <Sidebar tab={tab} onSwitch={setTab} />
         <main className="main">
-          {!connected && <div className="empty-hint">连接中…</div>}
+          {tab === 'companies' && (
+            <Companies
+              company={company}
+              agents={agents}
+              onSelectCompany={onSelectCompany}
+              onToast={toast}
+            />
+          )}
+
+          {tab !== 'companies' && !company && needCompanyHint}
+
+          {tab !== 'companies' && company && !connected && (
+            <div className="empty-hint">连接中…</div>
+          )}
+
           {connected && tab === 'home' && (
             <LivingRoom
               agents={agents} tasks={tasks} feed={feed}
@@ -164,10 +195,6 @@ export default function App() {
         task={artView && artView.task} artIndex={artView ? artView.idx : -1} />
 
       {toastMsg && <div className={`toast show${toastMsg.isErr ? ' err' : ''}`}>{toastMsg.msg}</div>}
-      </>)
-      : (
-        <Landing onEnter={(info) => setCompanyInfo(info)} />
-      )}
     </>
   );
 }

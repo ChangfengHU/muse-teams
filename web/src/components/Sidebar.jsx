@@ -2,6 +2,7 @@
 import React from 'react';
 
 const TABS = [
+  { key: 'companies', icon: '🏢', label: '公司' },
   { key: 'home', icon: '🏠', label: '客厅' },
   { key: 'tasks', icon: '📋', label: '任务' },
   { key: 'agents', icon: '👥', label: '成员' },

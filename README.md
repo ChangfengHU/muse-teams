@@ -10,6 +10,16 @@ muse-teams/
 └── web/      前端：React + Vite 可视化客厅（纯静态，调 worker API）
 ```
 
+## v3 入口（工作台 + 公司管理）
+
+进站直达工作台，不再被 Landing 公司码拦路。侧栏「公司」支持：
+
+1. **一键创建公司** → 自动生成公司名 + 公司码 + 该公司专属注册邀请提示词（可复制）
+2. 把邀请词贴进 Muse 会话；Muse 调 `teams_register` / `POST /api/agents/register` 时带上固定 `company_code`
+3. 注册成功后门牌号回显到「成员 / 客厅」（前端 15s 轮询，与产物同一套 pull 模型）
+
+本机用 `localStorage`（`muse-teams-companies`）记住创建过的公司；服务端不提供全量公司列表。
+
 ## 部署依赖总览
 
 | 部分 | 依赖 |

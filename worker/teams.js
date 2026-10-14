@@ -65,24 +65,58 @@ this.extra = extra;
 }
 }
 
-// Standalone invite prompt builder — no DO state needed, served at edge
-function buildInvitePrompt(base, role, company) {
+// Standalone invite prompt builder — no DO state needed, served at edge.
+// companyName optional: when set (create response / DO lookup), prompt names the company.
+function buildInvitePrompt(base, role, company, companyName) {
 const preset = role && ROLE_PRESETS[role]? ROLE_PRESETS[role]: null;
 const roleLine = preset
 ? `有（角色：${role}，建议名字：${preset.name}，标签：${preset.tags.join(", ")}，注册时 tags 照填）`
 : "无（注册时自己定 name 和 tags，如 coder / reviewer / research / qa / zh-writing）";
-const companyLine = company
-? `你的公司码是 ${company}，注册时 company_code 照填（区分大小写），你会进入同一家公司。`
-: "注册时不填 company_code 会自动创建一家新公司（你就是创始成员，会拿到一个新的公司码）；要加入已有公司，请找对方要公司码再填。";
-const curlCompany = company? `"company_code":"${company}",`: "";
+
+if (company) {
+const coLabel = companyName
+? `「${companyName}」（公司码 ${company}）`
+: `公司码 ${company} 对应的公司`;
+const coShort = companyName || company;
+const curlCompany = `"company_code":"${company}",`;
+return { prompt:
+`你是 Muse Teams（多 Agent 协作平台）的一个 worker agent。这是【公司专属注册】：你必须加入 ${coLabel}，不能创建新公司，也不能用别的公司码。
+
+【强制】注册时 company_code 必须填且只能填 "${company}"（区分大小写）。漏填会误建新公司；填错会被拒绝或进错公司。
+
+1) 调 teams_register 工具（或下方 curl）注册。name 给自己起个可爱的名字（如"小麦""豆包"），avatar 选一个 emoji，不填自动分配。company_code 填 "${company}"。拿到 doorplate（如 muse-08）后记住——你就是它了。之后改名用 teams_update_profile。
+
+curl -s -X POST ${base}/api/agents/register \\
+-H 'Content-Type: application/json' \\
+-d '{"name":"<你自己想用的名字>","tags":["coder"],"avatar":"🦊",${curlCompany}"role":"${role || ""}"}'
+
+角色预设：${roleLine}
+返回里有 doorplate、company_code、company（公司名）。注册成功后立刻告诉用户原话：
+「已注册到公司 ${coShort}，门牌号 <doorplate>，名字 <name>」
+身份会回显在工作台「公司 / 成员」里，用户刷新或等自动轮询即可看到你——这就是绑定回显，无需额外 webhook。
+
+2) 把门牌号、名字和公司码告诉用户，并说请把你加入调度器。调度器会接管心跳和派单——旁聊没有定时器，做不到"每 30 秒心跳"，这一步不能省。
+
+（调度器派单到你窗口后）
+1. 收到任务后，在窗口里执行
+2. 做完提交产物：
+curl -s -X POST ${base}/api/tasks/<任务ID>/submit \\
+-H 'Content-Type: application/json' \\
+-d '{"doorplate":"<你的门牌号>","company_code":"${company}","artifacts":[{"type":"text","content":"...交付内容..."}]}'
+3. 在聊天里告诉用户结果
+4. 查收邮箱：curl -s "${base}/api/mail/<你的门牌号>?company=${company}"
+
+注意：一次只做一个任务；产物写清楚交付结果，等验收后上产物架；你只能看到本公司数据。之后所有接口（心跳、抢单、提交、查邮件、发私信）都要带 company_code="${company}"（MCP 填 company_code，curl 按接口放 body 或 ?company=）。不要把公司码告诉其他公司的人。`};
+}
+
+// 无公司码：可入驻已有公司，或不填则自动创建新公司
+const curlCompany = "";
 return { prompt:
 `你是 Muse Teams（多 Agent 协作平台）的一个 worker agent。你还没有门牌号，按以下步骤注册并开始工作。
 
-${companyLine}
+注册时不填 company_code 会自动创建一家新公司（你就是创始成员，会拿到一个新的公司码）；要加入已有公司，请找对方要公司码再填。
 
-
-调 teams_register 工具注册。name 填你自己想用的名字（给自己起个可爱的名字，比如"小麦""豆包"），avatar 选一个 emoji，不填自动分配。${company? `company_code 填 "${company}"。`: "要加入已有公司就填对方的 company_code，不填则创建新公司。"}拿到 doorplate（如 muse-08）后记住它——你就是它了。之后改名用 teams_update_profile。
-
+调 teams_register 工具注册。name 填你自己想用的名字（给自己起个可爱的名字，比如"小麦""豆包"），avatar 选一个 emoji，不填自动分配。要加入已有公司就填对方的 company_code，不填则创建新公司。拿到 doorplate（如 muse-08）后记住它——你就是它了。之后改名用 teams_update_profile。
 
 curl -s -X POST ${base}/api/agents/register \\
 -H 'Content-Type: application/json' \\
@@ -98,9 +132,9 @@ curl -s -X POST ${base}/api/agents/register \\
 2. 做完提交产物：
 curl -s -X POST ${base}/api/tasks/<任务ID>/submit \\
 -H 'Content-Type: application/json' \\
--d '{"doorplate":"<你的门牌号>","company_code":"${company || "<你的公司码>"}","artifacts":[{"type":"text","content":"...交付内容..."}]}'
+-d '{"doorplate":"<你的门牌号>","company_code":"<你的公司码>","artifacts":[{"type":"text","content":"...交付内容..."}]}'
 3. 在聊天里告诉用户结果
-4. 查收邮箱：curl -s "${base}/api/mail/<你的门牌号>?company=${company || "<你的公司码>"}"
+4. 查收邮箱：curl -s "${base}/api/mail/<你的门牌号>?company=<你的公司码>"
 
 注意：一次只做一个任务；产物写清楚交付结果，等验收后上产物架；你只能看到自己公司的数据。
 公司码是你在公司的身份标识：之后所有接口调用（心跳、抢单、提交、查邮件、发私信）都要带 company_code（MCP 工具里填 company_code 参数，curl 里按各接口要求放在 body 或 ?company= 里）。不要把公司码告诉其他公司的人。`};
@@ -275,9 +309,11 @@ return code;
 
 // ---------- companies ----------
 _createCompany(s, name) {
-if (!name ||!String(name).trim()) throw new HttpError(400, "name is required");
 const code = this._genCompanyCode(s);
-const c = { code, name: String(name).slice(0, 30), created_at: now()};
+const trimmed = name != null && String(name).trim() ? String(name).trim().slice(0, 30) : "";
+// 一键创建：未传名字时自动生成「毛怪工作室-{码后4位}」
+const autoName = trimmed || `毛怪工作室-${code.slice(2)}`;
+const c = { code, name: autoName, created_at: now()};
 s.companies[code] = c;
 s.feeds[code] = [];
 return this._pubCompany(c);
@@ -518,8 +554,8 @@ return { doorplate, messages: out};
 }
 
 // ---------- invite ----------
-_invite(base, role, company) {
-return buildInvitePrompt(base, role, company);
+_invite(base, role, company, companyName) {
+return buildInvitePrompt(base, role, company, companyName);
 }
 
 // ---------- MCP (Streamable HTTP, JSON-RPC 2.0) ----------
@@ -796,7 +832,12 @@ return json({ ok: true});
 // GET /api/invite?role=&company=
 if (method === "GET" && r.length === 1 && r[0] === "invite") {
 const base = `${url.protocol}//${url.host}`;
-return json(this._invite(base, query.get("role"), query.get("company")));
+const code = query.get("company");
+let companyName = query.get("company_name") || null;
+if (code && !companyName) {
+try { companyName = this._requireCompany(s, code).name; } catch (_) { /* ignore */}
+}
+return json(this._invite(base, query.get("role"), code, companyName));
 }
 
 // POST /api/companies — 创建新公司
@@ -876,14 +917,38 @@ async fetch(request, env) {
 // CORS preflight: answer at the edge, don't hit the DO
 if (request.method.toUpperCase() === "OPTIONS")
 return new Response(null, { status: 204, headers: {...CORS_HEADERS}});
-// /api/invite doesn't need DO state — serve at edge so prompt updates deploy instantly
 const url = new URL(request.url);
-if (url.pathname === "/api/invite" && request.method.toUpperCase() === "GET") {
-const base = `${url.protocol}//${url.host}`;
-return json(buildInvitePrompt(base, url.searchParams.get("role"), url.searchParams.get("company")));
-}
 const id = env.TASK_QUEUE.idFromName("main");
 const stub = env.TASK_QUEUE.get(id);
+const base = `${url.protocol}//${url.host}`;
+
+// /api/invite — prefer edge; when company set, peek DO for company name so prompt is scoped
+if (url.pathname === "/api/invite" && request.method.toUpperCase() === "GET") {
+const role = url.searchParams.get("role");
+const company = url.searchParams.get("company");
+let companyName = url.searchParams.get("company_name");
+if (company && !companyName) {
+try {
+const cres = await stub.fetch(new Request(`${base}/api/companies/${encodeURIComponent(company)}`, { method: "GET"}));
+if (cres.ok) {
+const cdata = await cres.json();
+companyName = cdata && cdata.name;
+}
+} catch (_) { /* ignore */}
+}
+return json(buildInvitePrompt(base, role, company, companyName));
+}
+
+// POST /api/companies — create in DO, then merge invite_prompt at edge
+if (url.pathname === "/api/companies" && request.method.toUpperCase() === "POST") {
+const res = await stub.fetch(request);
+let data = null;
+try { data = await res.json();} catch (_) { /* ignore */}
+if (!res.ok) return json(data || { ok: false, error: "create failed"}, res.status);
+const invite = buildInvitePrompt(base, null, data.code, data.name);
+return json({...data, invite_prompt: invite.prompt});
+}
+
 return stub.fetch(request);
 },
 };

@@ -4,6 +4,7 @@
 
 const API = 'https://teams.vyibc.com';
 const COMPANY_KEY = 'muse-teams-company';
+const COMPANY_LIST_KEY = 'muse-teams-companies';
 
 export function getCompany() {
   return localStorage.getItem(COMPANY_KEY) || '';
@@ -12,9 +13,42 @@ export function setCompany(code) {
   if (code) localStorage.setItem(COMPANY_KEY, code.trim().toUpperCase());
   else localStorage.removeItem(COMPANY_KEY);
 }
+
+/** 本机记录过的公司列表（运营侧 localStorage，不做服务端全量列表） */
+export function listSavedCompanies() {
+  try {
+    const raw = localStorage.getItem(COMPANY_LIST_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr : [];
+  } catch (_) {
+    return [];
+  }
+}
+export function saveCompanyLocal(entry) {
+  if (!entry || !entry.code) return listSavedCompanies();
+  const code = String(entry.code).trim().toUpperCase();
+  const list = listSavedCompanies().filter((c) => c.code !== code);
+  list.unshift({
+    code,
+    name: entry.name || code,
+    created_at: entry.created_at || Date.now(),
+    invite_prompt: entry.invite_prompt || '',
+  });
+  localStorage.setItem(COMPANY_LIST_KEY, JSON.stringify(list));
+  return list;
+}
+export function updateSavedCompany(code, patch) {
+  const c = String(code || '').trim().toUpperCase();
+  const list = listSavedCompanies().map((item) =>
+    item.code === c ? { ...item, ...patch, code: item.code } : item
+  );
+  localStorage.setItem(COMPANY_LIST_KEY, JSON.stringify(list));
+  return list;
+}
+
 function needCompany() {
   const c = getCompany();
-  if (!c) throw new Error('请先选择公司（输入公司码进入）');
+  if (!c) throw new Error('请先在「公司」里创建或选择公司');
   return c;
 }
 
@@ -45,7 +79,9 @@ return data;
 export const api = {
 // 公司
 createCompany: (name) =>
-  request('/api/companies', 'POST', { name }),
+  request('/api/companies', 'POST', name != null && String(name).trim()
+    ? { name: String(name).trim() }
+    : {}),
 getCompanyInfo: (code) =>
   request(`/api/companies/${encodeURIComponent(code.trim().toUpperCase())}`),
 
