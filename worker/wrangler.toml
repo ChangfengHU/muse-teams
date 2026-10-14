@@ -1,0 +1,13 @@
+# Muse Teams 后端 Worker 部署配置
+# 标准 wrangler 流程：wrangler login && wrangler deploy
+name = "muse-teams-v1"
+main = "teams.js"
+compatibility_date = "2026-10-13"
+
+[[durable_objects.bindings]]
+name = "TASK_QUEUE"
+class_name = "TaskQueue"
+
+[[migrations]]
+tag = "v8"
+new_sqlite_classes = ["TaskQueue"]
