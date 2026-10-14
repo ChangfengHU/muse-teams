@@ -14,7 +14,7 @@ export function setCompany(code) {
   else localStorage.removeItem(COMPANY_KEY);
 }
 
-/** 本机记录过的公司列表（运营侧 localStorage，不做服务端全量列表） */
+/** 可选：本机缓存邀请词 / 最近选中；公司列表以服务端 D1 为准 */
 export function listSavedCompanies() {
   try {
     const raw = localStorage.getItem(COMPANY_LIST_KEY);
@@ -33,6 +33,7 @@ export function saveCompanyLocal(entry) {
     name: entry.name || code,
     created_at: entry.created_at || Date.now(),
     invite_prompt: entry.invite_prompt || '',
+    member_count: entry.member_count,
   });
   localStorage.setItem(COMPANY_LIST_KEY, JSON.stringify(list));
   return list;
@@ -77,7 +78,8 @@ return data;
 }
 
 export const api = {
-// 公司
+// 公司（列表来自 Worker D1，不再依赖本机 localStorage）
+listCompanies: () => request('/api/companies'),
 createCompany: (name) =>
   request('/api/companies', 'POST', name != null && String(name).trim()
     ? { name: String(name).trim() }

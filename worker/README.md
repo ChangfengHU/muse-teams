@@ -20,13 +20,17 @@ TaskQueue (Durable Object, 单例 "main")
 - **原子认领**：DO 单线程，先到先得，被抢返回 409，无需分布式锁。
 - **心跳过期**：读取时懒计算，90 秒无心跳 → offline。
 - **状态机**：`pending → claimed → review → done`，review 打回 → `pending`。
-- v1 无鉴权（fleet 内网）、无 D1（DO storage 足够）。
+- **D1 索引**：companies / agents / tasks 同步到 D1，供 `GET /api/companies` 与 Muse 发现；DO 仍是抢单权威源。
+- v1 无鉴权（fleet 内网）。
 
 ## API 一览（JSON 进出）
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/health` | `{ok:true}` |
+| GET | `/api/companies` | D1 公司列表 `{companies:[{code,name,created_at,member_count}]}` |
+| POST | `/api/companies` | 创建公司（DO + 同步 D1），返回含 `invite_prompt` |
+| GET | `/api/companies/:code` | 查询单公司 |
 | GET | `/api/invite?role=coder` | 返回可复制的注册 prompt 文本（含注册 API、注册后行为） |
 | POST | `/api/agents/register` | `{name?, tags?[], model?, avatar?, role?}` → `{doorplate, name, avatar, tags}` |
 | PATCH | `/api/agents/:doorplate` | `{name?, avatar?, tags?}`（只能改自己这三个字段） |

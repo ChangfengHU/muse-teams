@@ -57,6 +57,139 @@ status: st,
 headers: { "content-type": "application/json; charset=utf-8",...CORS_HEADERS},
 });
 
+
+// ---------- D1 index (companies / agents / tasks) ----------
+// DO remains source of truth for claim races; D1 is the queryable index for UI/Muse listing.
+const D1_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS companies (
+  code TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS agents (
+  doorplate TEXT NOT NULL,
+  company_code TEXT NOT NULL,
+  name TEXT,
+  avatar TEXT,
+  tags TEXT,
+  role TEXT,
+  model TEXT,
+  last_heartbeat INTEGER,
+  current_task TEXT,
+  PRIMARY KEY (company_code, doorplate)
+);
+CREATE TABLE IF NOT EXISTS tasks (
+  id TEXT NOT NULL,
+  company_code TEXT NOT NULL,
+  title TEXT,
+  status TEXT,
+  owner TEXT,
+  payload TEXT,
+  updated_at INTEGER,
+  PRIMARY KEY (company_code, id)
+);
+CREATE INDEX IF NOT EXISTS idx_agents_company ON agents(company_code);
+CREATE INDEX IF NOT EXISTS idx_tasks_company ON tasks(company_code);
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(company_code, status);
+`;
+
+async function ensureD1Schema(db) {
+  if (!db) return;
+  // D1 exec accepts multi-statement in batch via prepare/run per statement
+  const stmts = D1_SCHEMA_SQL.split(";").map((s) => s.trim()).filter(Boolean);
+  for (const sql of stmts) {
+    await db.prepare(sql).run();
+  }
+}
+
+async function syncStateToD1(db, s) {
+  if (!db || !s) return;
+  await ensureD1Schema(db);
+  const companies = Object.values(s.companies || {});
+  const agents = Object.values(s.agents || {});
+  const tasks = Object.values(s.tasks || {});
+
+  // Full replace for consistency with DO snapshot (small datasets)
+  await db.batch([
+    db.prepare("DELETE FROM tasks"),
+    db.prepare("DELETE FROM agents"),
+    db.prepare("DELETE FROM companies"),
+  ]);
+
+  const batch = [];
+  for (const c of companies) {
+    batch.push(
+      db.prepare("INSERT INTO companies (code, name, created_at) VALUES (?, ?, ?)").bind(
+        c.code, c.name || c.code, c.created_at || 0
+      )
+    );
+  }
+  for (const a of agents) {
+    batch.push(
+      db.prepare(
+        `INSERT INTO agents (doorplate, company_code, name, avatar, tags, role, model, last_heartbeat, current_task)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        a.doorplate,
+        a.company || "",
+        a.name || "",
+        a.avatar || "",
+        JSON.stringify(a.tags || []),
+        a.role || "member",
+        a.model || null,
+        a.last_heartbeat || null,
+        a.current_task || null
+      )
+    );
+  }
+  for (const t of tasks) {
+    const payload = JSON.stringify({
+      desc: t.desc || "",
+      priority: t.priority || "P1",
+      deps: t.deps || [],
+      acceptance: t.acceptance || "",
+      artifacts: t.artifacts || [],
+      created_at: t.created_at || null,
+      claimed_at: t.claimed_at || null,
+    });
+    batch.push(
+      db.prepare(
+        `INSERT INTO tasks (id, company_code, title, status, owner, payload, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        t.id,
+        t.company || "",
+        t.title || "",
+        t.status || "pending",
+        t.owner || null,
+        payload,
+        now()
+      )
+    );
+  }
+  // D1 batch limit ~1000; chunk if needed
+  for (let i = 0; i < batch.length; i += 200) {
+    await db.batch(batch.slice(i, i + 200));
+  }
+}
+
+async function listCompaniesFromD1(db) {
+  if (!db) return [];
+  await ensureD1Schema(db);
+  const { results } = await db.prepare(
+    `SELECT c.code, c.name, c.created_at,
+            (SELECT COUNT(*) FROM agents a WHERE a.company_code = c.code) AS member_count
+     FROM companies c
+     ORDER BY c.created_at DESC`
+  ).all();
+  return (results || []).map((r) => ({
+    code: r.code,
+    name: r.name,
+    created_at: r.created_at,
+    member_count: Number(r.member_count) || 0,
+  }));
+}
+
 class HttpError extends Error {
 constructor(status, message, extra) {
 super(message);
@@ -807,6 +940,13 @@ const s = await this._load();
 try {
 const out = this._route(s, { method, seg, query: url.searchParams, body, url});
 await this._save(s);
+// Sync D1 index after mutating requests (and explicit backfill)
+const wantSync = method !== "GET" || (seg[1] === "admin" && seg[2] === "backfill-d1");
+if (wantSync && this.env && this.env.DB) {
+try { await syncStateToD1(this.env.DB, s); } catch (syncErr) {
+console.error("d1 sync failed", syncErr && syncErr.message);
+}
+}
 return out;
 } catch (e) {
 if (e instanceof HttpError)
@@ -838,6 +978,25 @@ if (code && !companyName) {
 try { companyName = this._requireCompany(s, code).name; } catch (_) { /* ignore */}
 }
 return json(this._invite(base, query.get("role"), code, companyName));
+}
+
+// GET /api/companies — list from DO (edge prefers D1; this is fallback/backfill source)
+if (method === "GET" && r.length === 1 && r[0] === "companies") {
+const list = Object.values(s.companies || {}).map((c) => {
+const member_count = Object.values(s.agents || {}).filter((a) => a.company === c.code).length;
+return { ...this._pubCompany(c), member_count };
+}).sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+return json({ companies: list });
+}
+
+// POST /api/admin/backfill-d1 — push current DO snapshot into D1
+if (method === "POST" && r.length === 2 && r[0] === "admin" && r[1] === "backfill-d1") {
+return json({
+ok: true,
+companies: Object.keys(s.companies || {}).length,
+agents: Object.keys(s.agents || {}).length,
+tasks: Object.keys(s.tasks || {}).length,
+});
 }
 
 // POST /api/companies — 创建新公司
@@ -921,9 +1080,32 @@ const url = new URL(request.url);
 const id = env.TASK_QUEUE.idFromName("main");
 const stub = env.TASK_QUEUE.get(id);
 const base = `${url.protocol}//${url.host}`;
+const method = request.method.toUpperCase();
+
+// GET /api/companies — prefer D1 index; backfill from DO when empty
+if (url.pathname === "/api/companies" && method === "GET") {
+try {
+let companies = await listCompaniesFromD1(env.DB);
+if (!companies.length) {
+// Backfill: DO syncs to D1 on this POST, then re-list
+try {
+await stub.fetch(new Request(`${base}/api/admin/backfill-d1`, {
+method: "POST",
+headers: { "content-type": "application/json" },
+body: "{}",
+}));
+} catch (e) { console.error("backfill failed", e && e.message); }
+companies = await listCompaniesFromD1(env.DB);
+}
+// If D1 still empty (no DB binding / sync fail), fall through to DO list
+if (companies.length) return json({ companies });
+} catch (e) {
+console.error("d1 list companies failed", e && e.message);
+}
+}
 
 // /api/invite — prefer edge; when company set, peek DO for company name so prompt is scoped
-if (url.pathname === "/api/invite" && request.method.toUpperCase() === "GET") {
+if (url.pathname === "/api/invite" && method === "GET") {
 const role = url.searchParams.get("role");
 const company = url.searchParams.get("company");
 let companyName = url.searchParams.get("company_name");
