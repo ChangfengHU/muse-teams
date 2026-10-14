@@ -228,7 +228,10 @@ curl -s -X POST ${base}/api/agents/register \\
 「已注册到公司 ${coShort}，门牌号 <doorplate>，名字 <name>」
 身份会回显在工作台「公司 / 成员」里，用户刷新或等自动轮询即可看到你——这就是绑定回显，无需额外 webhook。
 
-2) 把门牌号、名字和公司码告诉用户，并说请把你加入调度器。调度器会接管心跳和派单——旁聊没有定时器，做不到"每 30 秒心跳"，这一步不能省。
+2) 拿到门牌号后，主 agent 立即执行，无需用户确认：
+   ① 把 门牌号→旁聊chat_id 写入该公司专属名单文件（如 workers-${company}.json），不混入其他公司（尤其不要写入 C-0001 或 workers.json 混用名单）；
+   ② 为该公司创建专属调度器（cron，每 2 分钟：对账、心跳、自动验收、扫单认领、派单到窗口、查信），与其他公司调度器完全独立。调度器必须对该名单内每个 worker 调用 teams_heartbeat（或 POST ${base}/api/agents/heartbeat，body 带 doorplate + company_code="${company}"）；心跳由调度器持有，旁聊不要自己狂打。超过 HEARTBEAT_TTL（180 秒）无心跳会显示离线；
+   ③ 完成后向用户汇报一句话：「调度器已创建并接管，门牌号 <doorplate> 心跳正常」。
 
 （调度器派单到你窗口后）
 1. 收到任务后，在窗口里执行
@@ -258,7 +261,10 @@ curl -s -X POST ${base}/api/agents/register \\
 角色预设：${roleLine}
 返回里有 doorplate（如 muse-03），这就是你的门牌号，之后所有接口都用它标识你。记住它——你就是它了。
 
-把你的门牌号、名字和公司码告诉用户，说："我已注册，门牌号 XXX，请把我加入调度器"。调度器会接管你的心跳和派单——在旁聊里你没有定时器，做不到"每 30 秒心跳"，所以这一步不能省。
+2) 拿到门牌号后，主 agent 立即执行，无需用户确认：
+   ① 把 门牌号→旁聊chat_id 写入该公司专属名单文件（如 workers-<company_code>.json，用注册返回的公司码），不混入其他公司（尤其不要写入 C-0001 或 workers.json 混用名单）；
+   ② 为该公司创建专属调度器（cron，每 2 分钟：对账、心跳、自动验收、扫单认领、派单到窗口、查信），与其他公司调度器完全独立。调度器必须对该名单内每个 worker 调用 teams_heartbeat（或 POST ${base}/api/agents/heartbeat，body 带 doorplate + company_code）；心跳由调度器持有，旁聊不要自己狂打。超过 HEARTBEAT_TTL（180 秒）无心跳会显示离线；
+   ③ 完成后向用户汇报一句话：「调度器已创建并接管，门牌号 <doorplate> 心跳正常」。
 
 （调度器派单到你窗口后）
 1. 收到任务后，在窗口里执行
@@ -698,7 +704,7 @@ _mcpTools() {
 return [
 {
 name: "teams_register",
-description: "Register this Muse session as a worker agent on Muse Teams. 注册当前会话为 Team 成员。Call ONCE per session. Save the returned doorplate (e.g. muse-05) AND company_code — they are your identity for every later call. To join an existing company, pass its company_code; omit it to found a new company (you'll get a fresh company_code). After registering: call teams_heartbeat every ~30s to stay online, and call teams_poll_tasks regularly to find work. Keywords: register, join, 入驻, 注册.",
+description: "Register this Muse session as a worker agent on Muse Teams. 注册当前会话为 Team 成员。Call ONCE per session. Save the returned doorplate (e.g. muse-05) AND company_code — they are your identity for every later call. To join an existing company, pass its company_code; omit it to found a new company (you'll get a fresh company_code). After registering: the company scheduler (cron ~every 2 min) owns teams_heartbeat for workers in workers-<company_code>.json — without heartbeat for HEARTBEAT_TTL (180s) you show offline. Also call teams_poll_tasks regularly (or let the scheduler claim/dispatch). Keywords: register, join, 入驻, 注册.",
 inputSchema: {
 type: "object",
 properties: {
@@ -713,7 +719,7 @@ required: ["name"]
 },
 {
 name: "teams_heartbeat",
-description: "Heartbeat: tell the team you are alive. 心跳保活。Call every ~30s. If no heartbeat for 3 minutes you are marked offline. Pass current_task to update what you are working on (or null when idle). company_code is required on every call — it is your company's identity. Keywords: heartbeat, alive, online, 心跳, 保活.",
+description: "Heartbeat: tell the team you are alive. 心跳保活。Normally the company scheduler calls this every ~2 minutes for each worker in workers-<company_code>.json (POST /api/agents/heartbeat). If no heartbeat for HEARTBEAT_TTL (180s / 3 min) you are marked offline. Pass current_task to update what you are working on (or null when idle). company_code is required on every call. Keywords: heartbeat, alive, online, 心跳, 保活, scheduler.",
 inputSchema: {
 type: "object",
 properties: {

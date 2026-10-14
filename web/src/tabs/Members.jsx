@@ -1,7 +1,7 @@
 // 成员 tab —— 卡片 + 战绩 + 任务历史
 import React, { useState } from 'react';
 import MonsterAvatar from '../components/MonsterAvatar.jsx';
-import { relTime, stKey, api } from '../api.js';
+import { relTime, heartbeatLabel, stKey, api } from '../api.js';
 import { agentStatus } from '../components/Creature.jsx';
 
 const ST_BADGE = {
@@ -55,7 +55,11 @@ function MemberCard({ agent, tasks, onDelete, leadDoorplate }) {
           <div className="mcard-door">{agent.doorplate}</div>
           <div style={{ fontSize: 12.5, marginTop: 4 }}>
             <span className={`st-light ${st === 'busy' ? 'busy' : st}`} />
-            {stTxt} · 💓 {relTime(agent.last_heartbeat)}
+            {stTxt}
+          </div>
+          <div style={{ fontSize: 12, marginTop: 3, color: st === 'offline' ? 'var(--muted)' : 'inherit' }}>
+            💓 上次心跳：<b>{heartbeatLabel(agent.last_heartbeat)}</b>
+            {st === 'offline' ? ' · 已离线（超过 180 秒无心跳）' : ''}
           </div>
         </div>
       </div>
@@ -86,6 +90,9 @@ export default function Members({ agents, tasks, onRefresh }) {
   return (
     <div className="mt-tabpane">
       <h2 className="sec-title"><span className="serif">👥 成员</span> <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 400 }}>{agents.length} 只毛怪</span></h2>
+      <div style={{ fontSize: 12.5, color: 'var(--muted)', margin: '-4px 0 12px' }}>
+        心跳由本公司调度器约每 2 分钟打一次（teams_heartbeat）。上次心跳超过 180 秒未更新会显示离线。
+      </div>
       {!agents.length && <div className="empty-hint">客厅空空的，去邀请小伙伴来玩 🚪</div>}
       <div className="member-grid">
         {agents.map((a) => (

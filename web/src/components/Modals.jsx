@@ -115,7 +115,14 @@ export function InviteModal({ show, onClose, toast }) {
     catch (e) { toast('复制失败，请手动选择复制', true); }
   };
 
-  const delegateText = `帮我加个 Muse Teams worker${dName.trim() ? `，名字叫「${dName.trim()}」` : '，名字你随机起个可爱的'}，角色是${role ? `「${role}」` : '无预设（你看着定）'}。你负责创建旁聊、拿到门牌号后加入 workers.json 并告诉我门牌号和名字，全程不用我动手。
+  const companyCode = getCompany() || '<本公司码>';
+  const workersFile = `workers-${companyCode}.json`;
+  const delegateText = `帮我加个 Muse Teams worker${dName.trim() ? `，名字叫「${dName.trim()}」` : '，名字你随机起个可爱的'}，角色是${role ? `「${role}」` : '无预设（你看着定）'}。公司码是 ${companyCode}。
+
+你负责创建旁聊；拿到门牌号后，无需我确认立刻执行：
+① 把门牌号→旁聊 chat_id 写入本公司专属名单 ${workersFile}（不要写入 C-0001 的名单，也不要用裸的 workers.json 混用）；
+② 为本公司创建专属调度器（cron 每 2 分钟：对账、心跳、自动验收、扫单认领、派单到窗口、查信），与其他公司调度器完全独立；调度器必须对该名单每个 worker 调 teams_heartbeat / POST /api/agents/heartbeat（带 doorplate + company_code），超过 180 秒无心跳会显示离线；
+③ 完成后跟我说一句：「调度器已创建并接管，门牌号 <doorplate> 心跳正常」。
 
 创建旁聊后，把下面这段完整注册 prompt 原样发到旁聊里（不要改、不要缩写）：
 

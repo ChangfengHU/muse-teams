@@ -2,13 +2,14 @@
 // idle → breathe/lookaround, working → workbob/pawtap, offline → curl/zzz
 import React, { useState, useRef, forwardRef } from 'react';
 import MonsterAvatar from './MonsterAvatar.jsx';
-import { relTime } from '../api.js';
+import { relTime, heartbeatLabel } from '../api.js';
 
-// 心跳 → 状态推导（与后端一致：90s）
+// 心跳 → 状态推导（与后端 HEARTBEAT_TTL 180s 一致）
+export const HEARTBEAT_TTL_MS = 180_000;
 export function agentStatus(a) {
   if (!a) return 'offline';
   const last = a.last_heartbeat || 0;
-  if (Date.now() - last > 90 * 1000) return 'offline';
+  if (!last || Date.now() - last > HEARTBEAT_TTL_MS) return 'offline';
   return a.current_task ? 'busy' : 'online';
 }
 
@@ -73,7 +74,7 @@ function Bubble({ open, agent, stTxt, onSendMsg, onOpenMailbox, onClose }) {
       </div>
       <div className="cb-row">🏷️ 标签：<b>{(agent.tags || []).join(' · ') || '无'}</b></div>
       <div className="cb-row">📌 当前任务：<b>{agent.current_task || '无'}</b></div>
-      <div className="cb-row">💓 心跳：<b>{relTime(agent.last_heartbeat)}</b></div>
+      <div className="cb-row">💓 上次心跳：<b>{heartbeatLabel(agent.last_heartbeat)}</b>{st === 'offline' ? ' · 已离线（>180s）' : ''}</div>
       <div className="breply">
         <input
           value={msg}

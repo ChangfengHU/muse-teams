@@ -160,6 +160,17 @@ month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
 });
 }
 
+/** 上次心跳展示：相对 + 绝对；与后端 HEARTBEAT_TTL 180s 对齐判断由调用方做 offline */
+export function heartbeatLabel(ts) {
+  if (!ts) return '从未（超过 180 秒无心跳会显示离线）';
+  const abs = new Date(ts).toLocaleString('zh-CN', {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  });
+  return `${relTime(ts)} / ${abs}`;
+}
+
+
 export function durStr(ms) {
 if (ms == null || ms < 0) return '';
 const s = Math.floor(ms / 1000);
