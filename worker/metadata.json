@@ -1,0 +1,1 @@
+{"bindings": [{"class_name": "TaskQueue", "name": "TASK_QUEUE", "type": "durable_object_namespace"}], "main_module": "teams.js", "migrations": {"old_tag": "v8", "new_tag": "v8"}}
