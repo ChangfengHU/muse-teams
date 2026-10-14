@@ -86,6 +86,18 @@ createCompany: (name) =>
     : {}),
 getCompanyInfo: (code) =>
   request(`/api/companies/${encodeURIComponent(code.trim().toUpperCase())}`),
+/** 公司级续约：scheduler 带全部门牌号一次刷新心跳 */
+companyRenew: (code, doorplates, from) =>
+  request(`/api/companies/${encodeURIComponent(String(code).trim().toUpperCase())}/renew`, 'POST', {
+    doorplates: doorplates || [],
+    ...(from ? { from } : {}),
+  }),
+/** 公司级续约：调度器用 workers-<code>.json 全部门牌号一次刷新心跳 */
+companyRenew: (code, doorplates, from) =>
+  request(`/api/companies/${encodeURIComponent(String(code).trim().toUpperCase())}/renew`, 'POST', {
+    doorplates: doorplates || [],
+    ...(from ? { from } : {}),
+  }),
 
 // 只读（全部按公司过滤）
 agents: () => request(`/api/agents?company=${encodeURIComponent(needCompany())}`),

@@ -5,7 +5,7 @@ const TABS = [
   { key: 'companies', icon: '🏢', label: '公司' },
   { key: 'home', icon: '🏠', label: '客厅' },
   { key: 'tasks', icon: '📋', label: '任务' },
-  { key: 'agents', icon: '👥', label: '成员' },
+  { key: 'agents', icon: '👥', label: '员工' },
   { key: 'arts', icon: '📦', label: '产物' },
   { key: 'feed', icon: '📻', label: '动态' },
 ];

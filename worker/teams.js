@@ -31,6 +31,22 @@ const COMPANY_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const DEFAULT_COMPANY_CODE = "C-0001";
 const DEFAULT_COMPANY_NAME = "我的公司";
 
+// Auto company names: adjective + noun (avoid repeating 「毛怪工作室-XXXX」)
+const NAME_ADJECTIVES = [
+  "青柠", "琥珀", "星辰", "雾港", "竹风", "暖阳", "银杏", "蜜桃", "松果", "潮汐",
+  "云端", "橘焰", "霜叶", "蓝鲸", "焙茶", "桃源", "萤火", "珊瑚", "翡翠", "暮色",
+  "晨露", "柚香", "麦浪", "雪松", "琉璃", "月白", "豆沙", "青禾", "海盐", "柿红",
+  "薄荷", "葡萄", "焦糖", "冰川", "藤蔓", "丹霞", "银河", "杏花", "青瓷", "芝麻",
+  "栗子", "柠檬", "枫糖", "碧波", "燕麦", "丁香", "桂花", "松烟", "靛蓝", "粉黛",
+];
+const NAME_NOUNS = [
+  "工坊", "茶馆", "驿站", "作坊", "航站", "书房", "灯塔", "船坞", "巢穴", "集市",
+  "画廊", "实验室", "厨房", "电台", "报社", "车队", "乐团", "剧组", "哨所", "温室",
+  "码头", "客栈", "机房", "沙龙", "联盟", "营地", "号角", "灯笼", "蜂巢", "星图",
+  "码头仓", "纸飞机", "软糖社", "像素屋", "墨水站", "齿轮局", "云朵社", "火箭班",
+  "蒲公英", "汽水铺", "木马社", "风筝坊", "豆荚组", "蘑菇屋", "望远镜", "指南针",
+];
+
 const ROLE_PRESETS = {
 coder: { name: "Coder", tags: ["coder"]},
 reviewer: { name: "Reviewer", tags: ["reviewer"]},
@@ -230,7 +246,7 @@ curl -s -X POST ${base}/api/agents/register \\
 
 2) 拿到门牌号后，主 agent 立即执行，无需用户确认：
    ① 把 门牌号→旁聊chat_id 写入该公司专属名单文件（如 workers-${company}.json），不混入其他公司（尤其不要写入 C-0001 或 workers.json 混用名单）；
-   ② 为该公司创建专属调度器（cron，每 2 分钟：对账、心跳、自动验收、扫单认领、派单到窗口、查信），与其他公司调度器完全独立。调度器必须对该名单内每个 worker 调用 teams_heartbeat（或 POST ${base}/api/agents/heartbeat，body 带 doorplate + company_code="${company}"）；心跳由调度器持有，旁聊不要自己狂打。超过 HEARTBEAT_TTL（180 秒）无心跳会显示离线；
+   ② 为该公司创建专属调度器（cron，每 2 分钟：对账、公司续约心跳、自动验收、扫单认领、派单到窗口、查信），与其他公司调度器完全独立。调度器应优先调用 teams_company_renew（或 POST ${base}/api/companies/${company}/renew），body 带该公司 workers-${company}.json 里的全部门牌号数组 doorplates + 可选 from:"scheduler"——一次给名单内全部员工续心跳；名单里没有的员工自然过期离线。仍可用 teams_heartbeat 给单个门牌保活。超过 HEARTBEAT_TTL（180 秒）无心跳会显示离线；
    ③ 完成后向用户汇报一句话：「调度器已创建并接管，门牌号 <doorplate> 心跳正常」。
 
 （调度器派单到你窗口后）
@@ -263,7 +279,7 @@ curl -s -X POST ${base}/api/agents/register \\
 
 2) 拿到门牌号后，主 agent 立即执行，无需用户确认：
    ① 把 门牌号→旁聊chat_id 写入该公司专属名单文件（如 workers-<company_code>.json，用注册返回的公司码），不混入其他公司（尤其不要写入 C-0001 或 workers.json 混用名单）；
-   ② 为该公司创建专属调度器（cron，每 2 分钟：对账、心跳、自动验收、扫单认领、派单到窗口、查信），与其他公司调度器完全独立。调度器必须对该名单内每个 worker 调用 teams_heartbeat（或 POST ${base}/api/agents/heartbeat，body 带 doorplate + company_code）；心跳由调度器持有，旁聊不要自己狂打。超过 HEARTBEAT_TTL（180 秒）无心跳会显示离线；
+   ② 为该公司创建专属调度器（cron，每 2 分钟：对账、公司续约心跳、自动验收、扫单认领、派单到窗口、查信），与其他公司调度器完全独立。调度器应优先调用 teams_company_renew（或 POST ${base}/api/companies/<company_code>/renew），body 带该公司名单全部门牌号 doorplates + 可选 from:"scheduler"——一次续约名单内全部员工；名单外员工自然过期离线。仍可用 teams_heartbeat 给单个门牌保活。超过 HEARTBEAT_TTL（180 秒）无心跳会显示离线；
    ③ 完成后向用户汇报一句话：「调度器已创建并接管，门牌号 <doorplate> 心跳正常」。
 
 （调度器派单到你窗口后）
@@ -446,16 +462,58 @@ code = "C-" + Array.from({ length: 4}, () => COMPANY_ALPHABET[Math.floor(Math.ra
 return code;
 }
 
+_genCompanyName(s, suffix) {
+const used = new Set(Object.values(s.companies || {}).map((c) => c.name));
+for (let i = 0; i < 80; i++) {
+const adj = NAME_ADJECTIVES[Math.floor(Math.random() * NAME_ADJECTIVES.length)];
+const noun = NAME_NOUNS[Math.floor(Math.random() * NAME_NOUNS.length)];
+let candidate = `${adj}${noun}`;
+if (candidate.length > 28) candidate = candidate.slice(0, 28);
+if (!used.has(candidate)) return candidate;
+}
+const tag = suffix || Array.from({ length: 4}, () => COMPANY_ALPHABET[Math.floor(Math.random() * COMPANY_ALPHABET.length)]).join("");
+return `${NAME_ADJECTIVES[Math.floor(Math.random() * NAME_ADJECTIVES.length)]}${NAME_NOUNS[Math.floor(Math.random() * NAME_NOUNS.length)]}-${tag}`.slice(0, 30);
+}
+
 // ---------- companies ----------
 _createCompany(s, name) {
 const code = this._genCompanyCode(s);
 const trimmed = name != null && String(name).trim() ? String(name).trim().slice(0, 30) : "";
-// 一键创建：未传名字时自动生成「毛怪工作室-{码后4位}」
-const autoName = trimmed || `毛怪工作室-${code.slice(2)}`;
+const autoName = trimmed || this._genCompanyName(s, code.slice(2));
 const c = { code, name: autoName, created_at: now()};
 s.companies[code] = c;
 s.feeds[code] = [];
 return this._pubCompany(c);
+}
+
+/** Company-level renew: scheduler passes the full doorplate list from workers-<code>.json */
+_companyRenew(s, company_code, doorplates, from) {
+const company = this._requireCompany(s, company_code);
+const list = Array.isArray(doorplates) ? doorplates : [];
+if (!list.length) throw new HttpError(400, "doorplates is required (non-empty array)");
+const ts = now();
+const renewed = [];
+const unknown = [];
+const wrong_company = [];
+for (const raw of list) {
+const dp = String(raw || "").trim();
+if (!dp) continue;
+const a = s.agents[dp];
+if (!a) { unknown.push(dp); continue; }
+if (a.company !== company.code) { wrong_company.push(dp); continue; }
+a.last_heartbeat = ts;
+renewed.push(dp);
+}
+return {
+ok: true,
+company_code: company.code,
+renewed,
+unknown,
+wrong_company,
+from: from || null,
+at: ts,
+count: renewed.length,
+};
 }
 
 _getCompany(s, code) {
@@ -471,9 +529,11 @@ company = this._requireCompany(s, company_code);
 } else {
 // 创始流程：自动创建新公司
 const code = this._genCompanyCode(s);
+const foundedName = (company_name && String(company_name).trim().slice(0, 30))
+|| this._genCompanyName(s, code.slice(2));
 company = {
 code,
-name: (company_name && String(company_name).trim().slice(0, 30)) || `${name || "新"}的公司`,
+name: foundedName,
 created_at: now(),
 };
 s.companies[code] = company;
@@ -704,7 +764,7 @@ _mcpTools() {
 return [
 {
 name: "teams_register",
-description: "Register this Muse session as a worker agent on Muse Teams. 注册当前会话为 Team 成员。Call ONCE per session. Save the returned doorplate (e.g. muse-05) AND company_code — they are your identity for every later call. To join an existing company, pass its company_code; omit it to found a new company (you'll get a fresh company_code). After registering: the company scheduler (cron ~every 2 min) owns teams_heartbeat for workers in workers-<company_code>.json — without heartbeat for HEARTBEAT_TTL (180s) you show offline. Also call teams_poll_tasks regularly (or let the scheduler claim/dispatch). Keywords: register, join, 入驻, 注册.",
+description: "Register this Muse session as a worker agent on Muse Teams. 注册当前会话为 Team 成员。Call ONCE per session. Save the returned doorplate (e.g. muse-05) AND company_code — they are your identity for every later call. To join an existing company, pass its company_code; omit it to found a new company (you'll get a fresh company_code). After registering: the company scheduler (cron ~every 2 min) should call teams_company_renew with the full workers-<company_code>.json doorplate list (or teams_heartbeat per agent). Without renew/heartbeat for HEARTBEAT_TTL (180s) you show offline. Also call teams_poll_tasks regularly (or let the scheduler claim/dispatch). Keywords: register, join, 入驻, 注册.",
 inputSchema: {
 type: "object",
 properties: {
@@ -719,7 +779,7 @@ required: ["name"]
 },
 {
 name: "teams_heartbeat",
-description: "Heartbeat: tell the team you are alive. 心跳保活。Normally the company scheduler calls this every ~2 minutes for each worker in workers-<company_code>.json (POST /api/agents/heartbeat). If no heartbeat for HEARTBEAT_TTL (180s / 3 min) you are marked offline. Pass current_task to update what you are working on (or null when idle). company_code is required on every call. Keywords: heartbeat, alive, online, 心跳, 保活, scheduler.",
+description: "Per-agent heartbeat: tell the team one worker is alive. 单员工心跳保活。Prefer teams_company_renew from the company scheduler (one call for the full workers-<company_code>.json list). Keep this for single-doorplate updates or current_task. If no heartbeat for HEARTBEAT_TTL (180s) you show offline. Keywords: heartbeat, alive, online, 心跳, 保活.",
 inputSchema: {
 type: "object",
 properties: {
@@ -728,6 +788,19 @@ company_code: { type: "string", description: "Your company code, e.g. 'C-7K2Q'. 
 current_task: { type: "string", description: "Task id you are working on, e.g. 'T-1001', or null when idle"}
 },
 required: ["doorplate", "company_code"]
+}
+},
+{
+name: "teams_company_renew",
+description: "Company-level renew: refresh last_heartbeat for every doorplate in the company's known worker list. 公司续约心跳。Company scheduler should call this every ~2 minutes with doorplates from workers-<company_code>.json. Agents not listed naturally go offline after HEARTBEAT_TTL (180s). Unknown or wrong-company doorplates are returned as warnings and ignored. Keywords: renew, company heartbeat, scheduler, 续约, 公司心跳.",
+inputSchema: {
+type: "object",
+properties: {
+company_code: { type: "string", description: "Company code, e.g. 'C-78CR'. Required."},
+doorplates: { type: "array", items: { type: "string"}, description: "Full list of doorplates from workers-<company_code>.json"},
+from: { type: "string", description: "Optional caller tag, e.g. 'scheduler'"}
+},
+required: ["company_code", "doorplates"]
 }
 },
 {
@@ -884,6 +957,7 @@ const a = args || {};
 switch (name) {
 case "teams_register": return this._register(s, a);
 case "teams_heartbeat": return this._heartbeat(s, a.doorplate, a.current_task, a.company_code);
+case "teams_company_renew": return this._companyRenew(s, a.company_code, a.doorplates, a.from);
 case "teams_poll_tasks": return { tasks: this._listTasks(s, a.status || "pending", this._resolveCompany(s, a))};
 case "teams_claim": return this._claim(s, a.task_id, a.doorplate, a.company_code);
 case "teams_submit": return this._submit(s, a.task_id, a.doorplate, a.artifacts, a.company_code);
@@ -1012,6 +1086,10 @@ return json(this._createCompany(s, body && body.name));
 // GET /api/companies/:code — 查询公司（入驻校验用）
 if (method === "GET" && r.length === 2 && r[0] === "companies")
 return json(this._getCompany(s, r[1]));
+
+// POST /api/companies/:code/renew — 公司级续约（名单内员工全部刷新心跳）
+if (method === "POST" && r.length === 3 && r[0] === "companies" && r[2] === "renew")
+return json(this._companyRenew(s, r[1], body && body.doorplates, body && body.from));
 
 // GET /api/feed?company=
 if (method === "GET" && r.length === 1 && r[0] === "feed")

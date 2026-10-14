@@ -59,6 +59,7 @@ const Creature = forwardRef(function Creature(
 function Bubble({ open, agent, stTxt, onSendMsg, onOpenMailbox, onClose }) {
   const [msg, setMsg] = useState('');
   if (!open) return null;
+  const st = agentStatus(agent);
   const send = () => {
     if (msg.trim() && onSendMsg) onSendMsg(agent.doorplate, msg.trim());
     setMsg('');

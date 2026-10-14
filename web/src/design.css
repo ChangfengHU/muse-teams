@@ -303,3 +303,12 @@ body {
 /* 章节标题 */
 .sec-title { font-size: 17px; font-weight: 700; margin: 0 0 14px; }
 .sec-title .serif { font-size: 19px; }
+
+
+/* 员工管理表 */
+.staff-table th, .staff-table td { padding: 10px 10px; vertical-align: top; }
+.staff-table tbody tr.staff-row:hover { background: rgba(217,119,87,.06); }
+.staff-table tbody tr.staff-row.offline td { opacity: 0.78; }
+.staff-table .st-light { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: #3cb371; }
+.staff-table .st-light.busy { background: #d97757; }
+.staff-table .st-light.offline { background: #a0a0a0; }

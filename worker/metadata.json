@@ -1,1 +1,20 @@
-{"bindings": [{"class_name": "TaskQueue", "name": "TASK_QUEUE", "type": "durable_object_namespace"}], "main_module": "teams.js", "migrations": {"old_tag": "v8", "new_tag": "v8"}}
+{
+  "bindings": [
+    {
+      "class_name": "TaskQueue",
+      "name": "TASK_QUEUE",
+      "type": "durable_object_namespace"
+    },
+    {
+      "name": "DB",
+      "type": "d1",
+      "id": "708d3bef-c626-4ad2-aee6-12c30c01dd22"
+    }
+  ],
+  "main_module": "teams.js",
+  "compatibility_date": "2026-10-13",
+  "migrations": {
+    "old_tag": "v8",
+    "new_tag": "v8"
+  }
+}

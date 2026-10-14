@@ -180,7 +180,7 @@ export default function App() {
               onRefresh={() => refresh(true)} onOpenArtifact={openArtifact}
               onCelebrate={handleCelebrate} />
           )}
-          {connected && tab === 'agents' && <Members agents={agents} tasks={tasks} onRefresh={() => refresh(true)} />}
+          {connected && tab === 'agents' && <Members agents={agents} tasks={tasks} company={company} onRefresh={() => refresh(true)} />}
           {connected && tab === 'arts' && (
             <Artifacts tasks={tasks} agents={agents} onOpenArtifact={openArtifact} />
           )}
