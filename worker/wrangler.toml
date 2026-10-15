@@ -11,3 +11,9 @@ class_name = "TaskQueue"
 [[migrations]]
 tag = "v8"
 new_sqlite_classes = ["TaskQueue"]
+
+# D1 index for company/agent/task listing (DO remains source of truth for claim races)
+[[d1_databases]]
+binding = "DB"
+database_name = "muse-teams"
+database_id = "708d3bef-c626-4ad2-aee6-12c30c01dd22"

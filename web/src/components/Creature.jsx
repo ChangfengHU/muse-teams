@@ -1,38 +1,81 @@
 // 毛怪元素 —— 状态类驱动 CSS 动画
-// idle → breathe/lookaround, working → workbob/pawtap, offline → curl/zzz
-import React, { useState, useRef, forwardRef } from 'react';
+// idle → breathe/lookaround, working → workbob/pawtap, dormant(休眠) → curl/zzz (CSS class still .offline)
+import React, { useState, useRef, useEffect, forwardRef } from 'react';
 import MonsterAvatar from './MonsterAvatar.jsx';
-import { relTime } from '../api.js';
+import { relTime, heartbeatLabel } from '../api.js';
 
-// 心跳 → 状态推导（与后端一致：90s）
+// 心跳 → 状态推导（与后端 HEARTBEAT_TTL 180s 一致）
+// dormant = 休眠员工；API 也可能仍回 offline（兼容）
+export const HEARTBEAT_TTL_MS = 180_000;
 export function agentStatus(a) {
-  if (!a) return 'offline';
+  if (!a) return 'dormant';
+  // Always derive from heartbeat TTL — never trust a stale status==="online" for 等候抢单
+  if (a.status === 'dormant' || a.status === 'offline') return 'dormant';
   const last = a.last_heartbeat || 0;
-  if (Date.now() - last > 90 * 1000) return 'offline';
-  return a.current_task ? 'busy' : 'online';
+  if (!last || Date.now() - last > HEARTBEAT_TTL_MS) return 'dormant';
+  if (a.status === 'busy' || a.current_task) return 'busy';
+  return 'online';
+}
+export function isAgentDormant(stOrAgent) {
+  const st = typeof stOrAgent === 'string' ? stOrAgent : agentStatus(stOrAgent);
+  return st === 'dormant' || st === 'offline';
 }
 
 const Creature = forwardRef(function Creature(
-  { agent, leftPct, topPct, look = false, onSendMsg, onOpenMailbox },
+  { agent, leftPct, topPct, look = false, size = 'md', embedded = false, onSendMsg, onOpenMailbox },
   ref
 ) {
   const [bubbleOpen, setBubbleOpen] = useState(false);
-  const bubbleRef = useRef(null);
+  const rootRef = useRef(null);
   const st = agentStatus(agent);
-  const cls = st === 'offline' ? 'offline' : st === 'busy' ? 'working' : 'idle';
-  const stTxt = st === 'busy' ? '🏃 干活中' : st === 'offline' ? '💤 离线' : '🛋️ 等活儿';
+  const dormant = isAgentDormant(st);
+  const cls = dormant ? 'offline' : st === 'busy' ? 'working' : 'idle';
+  const stTxt = st === 'busy' ? '🏃 干活中' : dormant ? '💤 休眠' : '🛋️ 等活儿';
+  const sizeCls = size === 'lg' ? ' lg' : size === 'xs' ? ' xs' : size === 'sm' ? ' sm' : '';
+  const embedCls = embedded || (leftPct === 0 && topPct === 0) ? ' embedded' : '';
+  const avatarPx = size === 'lg' ? 152 : size === 'xs' ? 52 : size === 'sm' ? 64 : 104;
+
+  const setRefs = (el) => {
+    rootRef.current = el;
+    if (typeof ref === 'function') ref(el);
+    else if (ref) ref.current = el;
+  };
+
+  useEffect(() => {
+    if (!bubbleOpen) return undefined;
+    const onPointerDown = (e) => {
+      const root = rootRef.current;
+      if (!root) return;
+      if (root.contains(e.target)) return;
+      setBubbleOpen(false);
+    };
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') setBubbleOpen(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown, true);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown, true);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [bubbleOpen]);
+
+  const posStyle = embedCls
+    ? undefined
+    : { left: leftPct + '%', top: topPct + '%' };
 
   return (
     <div
-      ref={ref}
-      className={`mt-creature ${cls}`}
+      ref={setRefs}
+      className={`mt-creature ${cls}${sizeCls}${embedCls}`}
       data-doorplate={agent.doorplate}
-      style={{ left: leftPct + '%', top: topPct + '%' }}
+      title={[agent.doorplate, agent.muse_account && `账号 ${agent.muse_account}`, agent.muse_session && `旁聊 ${agent.muse_session}`, (agent.role_pack_snapshot && agent.role_pack_snapshot.name) || agent.role_pack_id].filter(Boolean).join(' · ')}
+      style={posStyle}
       onClick={() => setBubbleOpen((v) => !v)}
     >
       <div className="mt-c-excl">!</div>
       <div className={`mt-c-inner${look ? ' look' : ''}`}>
-        <MonsterAvatar doorplate={agent.doorplate} />
+        <MonsterAvatar doorplate={agent.doorplate} size={avatarPx} />
         <div className="mt-paws" />
         {st === 'busy' && <div className="mt-pdots">...</div>}
         <div className="mt-zzz"><span>z</span><span>z</span><span>z</span></div>
@@ -58,6 +101,7 @@ const Creature = forwardRef(function Creature(
 function Bubble({ open, agent, stTxt, onSendMsg, onOpenMailbox, onClose }) {
   const [msg, setMsg] = useState('');
   if (!open) return null;
+  const st = agentStatus(agent);
   const send = () => {
     if (msg.trim() && onSendMsg) onSendMsg(agent.doorplate, msg.trim());
     setMsg('');
@@ -72,8 +116,15 @@ function Bubble({ open, agent, stTxt, onSendMsg, onOpenMailbox, onClose }) {
         </div>
       </div>
       <div className="cb-row">🏷️ 标签：<b>{(agent.tags || []).join(' · ') || '无'}</b></div>
+      <div className="cb-row">👤 Muse 账号：<b>{agent.muse_account || '未登记'}</b></div>
+      {(agent.role_pack_id || (agent.role_pack_snapshot && agent.role_pack_snapshot.name)) && (
+        <div className="cb-row">🧰 角色包：<b>{(agent.role_pack_snapshot && agent.role_pack_snapshot.name) || agent.role_pack_id}</b>
+          {agent.role_pack_snapshot && agent.role_pack_snapshot.duty ? ` — ${agent.role_pack_snapshot.duty}` : ''}
+        </div>
+      )}
+      <div className="cb-row">💬 旁聊会话：<b>{agent.muse_session || '未登记'}</b></div>
       <div className="cb-row">📌 当前任务：<b>{agent.current_task || '无'}</b></div>
-      <div className="cb-row">💓 心跳：<b>{relTime(agent.last_heartbeat)}</b></div>
+      <div className="cb-row">💓 上次心跳：<b>{heartbeatLabel(agent.last_heartbeat)}</b>{isAgentDormant(st) ? ' · 休眠员工（>180s 无心跳）' : ''}</div>
       <div className="breply">
         <input
           value={msg}

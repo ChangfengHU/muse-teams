@@ -1,0 +1,725 @@
+// 公司管理 —— 卡通卡片网格 + 分页 + 暖色交互
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import {
+  api, getCompany, setCompany,
+  listSavedCompanies, saveCompanyLocal, updateSavedCompany,
+} from '../api.js';
+
+const SPEC_LABELS = {
+  video_gen: '🎬 视频生成',
+  edit: '✂️ 剪辑',
+  general: '🧩 通用',
+  coder: '💻 码农',
+  reviewer: '🔍 验收',
+  research: '🔬 研究',
+  qa: '🧪 测试',
+  'zh-writing': '✍️ 写作',
+  devops: '🛠 运维',
+};
+
+import MonsterAvatar from '../components/MonsterAvatar.jsx';
+
+const PAGE_SIZE = 8;
+
+function CompanyCard({ item, active, liveMembers, onSelect }) {
+  const count = active && liveMembers != null
+    ? liveMembers
+    : (item.member_count ?? 0);
+  const tags = Array.isArray(item.tags) ? item.tags : (item.specialties || []);
+  const intro = item.intro || item.blurb || '';
+  return (
+    <button
+      type="button"
+      className={`co-card${active ? ' active' : ''}`}
+      onClick={() => onSelect(item)}
+    >
+      <div className="co-card-blob" aria-hidden />
+      <div className="co-card-top">
+        <div className="co-card-avatar">
+          <MonsterAvatar doorplate={item.code || 'C-??'} size={48} />
+        </div>
+        <div className="co-card-title">
+          <div className="co-card-name">{item.name || item.code}</div>
+          <span className="co-code-badge">{item.code}</span>
+          {item.status === 'archived' ? (
+            <span className="co-code-badge" style={{ marginLeft: 6 }}>已注销</span>
+          ) : item.status === 'suspended' ? (
+            <span className="co-code-badge" style={{ marginLeft: 6 }}>休眠（手动）</span>
+          ) : item.heartbeat_dormant ? (
+            <span className="co-code-badge" style={{ marginLeft: 6 }}>休眠公司</span>
+          ) : null}
+        </div>
+        {active && <span className="co-card-pill">✨ 当前</span>}
+      </div>
+      {intro ? <div className="co-card-intro">{intro}</div> : null}
+      {!!tags.length && (
+        <div className="co-card-tags">
+          {tags.slice(0, 6).map((t) => (
+            <span key={t} className="co-chip">{SPEC_LABELS[t] || t}</span>
+          ))}
+        </div>
+      )}
+      <div className="co-card-foot">
+        <span className="co-card-stat">
+          <span className="co-stat-ico" aria-hidden>🐾</span>
+          <b>{count}</b> 只毛怪
+        </span>
+        <span className={`co-card-cta${active ? ' is-on' : ''}`}>
+          {active ? '已进入' : '进去玩玩 →'}
+        </span>
+      </div>
+    </button>
+  );
+}
+
+function EmptyCompanions() {
+  return (
+    <div className="co-empty">
+      <div className="co-empty-art" aria-hidden>
+        <MonsterAvatar doorplate="empty-left" size={72} />
+        <MonsterAvatar doorplate="empty-mid" size={88} />
+        <MonsterAvatar doorplate="empty-right" size={72} />
+      </div>
+      <div className="co-empty-title serif">客厅还空着呢</div>
+      <div className="co-empty-sub">点「开一家公司」生出新窝，或输入朋友的公司码挤进去。</div>
+    </div>
+  );
+}
+
+export default function Companies({ company, agents, onSelectCompany, onToast }) {
+  const [list, setList] = useState([]);
+  const [listLoading, setListLoading] = useState(true);
+  const [listError, setListError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [joinCode, setJoinCode] = useState('');
+  const [joinBusy, setJoinBusy] = useState(false);
+  const [joinError, setJoinError] = useState('');
+  const [invitePrompt, setInvitePrompt] = useState('');
+  const [inviteLoading, setInviteLoading] = useState(false);
+  const [editIntro, setEditIntro] = useState('');
+  const [editTags, setEditTags] = useState('');
+  const [profileBusy, setProfileBusy] = useState(false);
+  const [page, setPage] = useState(1);
+  const [showJoin, setShowJoin] = useState(false);
+  const [createPulse, setCreatePulse] = useState(false);
+  const [lifeBusy, setLifeBusy] = useState(false);
+  const [lifePrompt, setLifePrompt] = useState('');
+  const [searchQ, setSearchQ] = useState('');
+  const currentCode = (company && company.code) || getCompany() || '';
+
+  const toast = useCallback((msg, isErr) => {
+    if (onToast) onToast(msg, isErr);
+  }, [onToast]);
+
+  const loadCompanies = useCallback(async (silent) => {
+    if (!silent) setListLoading(true);
+    setListError('');
+    try {
+      const res = await api.listCompanies();
+      const companies = (res && res.companies) || [];
+      const selectedCode = getCompany() || '';
+      companies.sort((a, b) => {
+        // 有心跳的公司永远排前面；休眠公司默认隐藏，仅搜索可见
+        const da = a.heartbeat_dormant ? 1 : 0;
+        const db_ = b.heartbeat_dormant ? 1 : 0;
+        if (da !== db_) return da - db_;
+        const aSel = a.code === selectedCode ? 1 : 0;
+        const bSel = b.code === selectedCode ? 1 : 0;
+        if (bSel !== aSel) return bSel - aSel;
+        const na = a.member_count || 0;
+        const nb = b.member_count || 0;
+        if (nb !== na) return nb - na;
+        return (b.created_at || 0) - (a.created_at || 0);
+      });
+      setList(companies);
+      const cached = listSavedCompanies();
+      for (const c of companies) {
+        const hit = cached.find((x) => x.code === c.code);
+        if (hit && hit.invite_prompt) {
+          saveCompanyLocal({ ...c, invite_prompt: hit.invite_prompt });
+        } else {
+          saveCompanyLocal(c);
+        }
+      }
+      return companies;
+    } catch (e) {
+      const msg = e && e.message ? e.message : String(e);
+      setListError(msg);
+      if (!silent) toast('加载公司列表失败: ' + msg, true);
+      setList(listSavedCompanies());
+      return [];
+    } finally {
+      if (!silent) setListLoading(false);
+    }
+  }, [toast]);
+
+  useEffect(() => {
+    loadCompanies(false);
+  }, [loadCompanies]);
+
+  // 默认只展示有心跳的公司；搜索时才露出休眠公司（按名/码匹配）
+  const visibleList = useMemo(() => {
+    const q = String(searchQ || '').trim().toLowerCase();
+    return list.filter((c) => {
+      if (q) {
+        const name = String(c.name || '').toLowerCase();
+        const code = String(c.code || '').toLowerCase();
+        return name.includes(q) || code.includes(q);
+      }
+      // 当前已进入的公司即使休眠也保留，避免丢上下文
+      if (currentCode && c.code === currentCode) return true;
+      return !c.heartbeat_dormant;
+    });
+  }, [list, searchQ, currentCode]);
+
+  const dormantHiddenN = useMemo(() => {
+    if (String(searchQ || '').trim()) return 0;
+    return list.filter((c) => c.heartbeat_dormant && c.code !== currentCode).length;
+  }, [list, searchQ, currentCode]);
+
+  // keep page in range when list shrinks
+  const totalPages = Math.max(1, Math.ceil(visibleList.length / PAGE_SIZE));
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
+
+  // jump to page containing selected company
+  useEffect(() => {
+    if (!currentCode || !visibleList.length) return;
+    const idx = visibleList.findIndex((c) => c.code === currentCode);
+    if (idx >= 0) setPage(Math.floor(idx / PAGE_SIZE) + 1);
+  }, [currentCode, visibleList]);
+
+  useEffect(() => {
+    if (!currentCode) {
+      setInvitePrompt('');
+      return;
+    }
+    const cached = listSavedCompanies().find((c) => c.code === currentCode);
+    if (cached && cached.invite_prompt) {
+      setInvitePrompt(cached.invite_prompt);
+      return;
+    }
+    let cancelled = false;
+    setInviteLoading(true);
+    api.invite()
+      .then((r) => {
+        if (cancelled) return;
+        const p = (r && r.prompt) || '';
+        setInvitePrompt(p);
+        if (p) updateSavedCompany(currentCode, { invite_prompt: p });
+      })
+      .catch((e) => {
+        if (!cancelled) setInvitePrompt('加载邀请词失败: ' + e.message);
+      })
+      .finally(() => { if (!cancelled) setInviteLoading(false); });
+    return () => { cancelled = true; };
+  }, [currentCode]);
+
+  useEffect(() => {
+    const sel = list.find((c) => c.code === currentCode);
+    if (!sel) {
+      setEditIntro('');
+      setEditTags('');
+      return;
+    }
+    setEditIntro(sel.intro || sel.blurb || '');
+    const tags = Array.isArray(sel.tags) ? sel.tags : (sel.specialties || []);
+    setEditTags(tags.join(', '));
+  }, [currentCode, list]);
+
+  const pageItems = useMemo(() => {
+    const start = (page - 1) * PAGE_SIZE;
+    return visibleList.slice(start, start + PAGE_SIZE);
+  }, [visibleList, page]);
+
+  const copy = async (text, okMsg) => {
+    if (!text) { toast('没有可复制的内容', true); return; }
+    try {
+      await navigator.clipboard.writeText(text);
+      toast(okMsg);
+    } catch (_) {
+      toast('复制失败，请手动选择复制', true);
+    }
+  };
+
+  const runLifecycle = async (action) => {
+    const code = currentCode;
+    if (!code) { toast('先选一家公司', true); return; }
+    const labels = { suspend: '公司休眠', resume: '公司重开', archive: '公司注销' };
+    const label = labels[action] || action;
+    if (action === 'archive') {
+      const ok = window.confirm(`确认「${label}」${code}？此操作不可重开，将擦除公司数据。`);
+      if (!ok) return;
+    } else if (action === 'suspend') {
+      const ok = window.confirm(`确认「${label}」${code}？可之后公司重开；数据保留。`);
+      if (!ok) return;
+    }
+    setLifeBusy(true);
+    try {
+      // Lifecycle requires lead `from`. Resolve lead from roster; empty shell prompts operator tag.
+      let from = null;
+      try {
+        const { agents } = await api.agentsFor(code);
+        const list = agents || [];
+        const lead = list.find((a) => a.role === 'lead') || list[0] || null;
+        from = lead ? lead.doorplate : null;
+      } catch (_) { /* ignore */ }
+      if (!from) {
+        from = window.prompt('请输入本公司 lead 门牌号（空公司可填操作者标记）');
+        if (!from || !String(from).trim()) {
+          toast('需要 from（lead 门牌号）才能操作', true);
+          return;
+        }
+        from = String(from).trim();
+      }
+      const fn = action === 'suspend' ? api.companySuspend
+        : action === 'resume' ? api.companyResume
+        : api.companyArchive;
+      const out = await fn(code, from);
+      setLifePrompt(out.prompt || '');
+      toast(`${label}成功 · status=${out.status || (out.company && out.company.status)}`);
+      await loadCompanies(true);
+      if (out.company) onSelectCompany && onSelectCompany(out.company);
+    } catch (e) {
+      toast(`${label}失败: ` + (e.message || e), true);
+    } finally {
+      setLifeBusy(false);
+    }
+  };
+
+
+  const createOne = async () => {
+    setBusy(true);
+    setCreatePulse(true);
+    try {
+      const c = await api.createCompany();
+      const entry = {
+        code: c.code,
+        name: c.name,
+        created_at: c.created_at || Date.now(),
+        invite_prompt: c.invite_prompt || '',
+        member_count: 0,
+      };
+      saveCompanyLocal(entry);
+      setCompany(c.code);
+      setInvitePrompt(entry.invite_prompt);
+      onSelectCompany && onSelectCompany({ code: c.code, name: c.name, created_at: c.created_at });
+      toast(`🎉 新窝开张：${c.name}（${c.code}）`);
+      const companies = await loadCompanies(true);
+      const idx = (companies || []).findIndex((x) => x.code === c.code);
+      if (idx >= 0) setPage(Math.floor(idx / PAGE_SIZE) + 1);
+      else setPage(1);
+    } catch (e) {
+      toast('创建失败: ' + e.message, true);
+    } finally {
+      setBusy(false);
+      setTimeout(() => setCreatePulse(false), 600);
+    }
+  };
+
+  const joinByCode = async () => {
+    const code = String(joinCode || '').trim().toUpperCase();
+    setJoinError('');
+    if (!code) {
+      setJoinError('先写上公司码，例如 C-78CR');
+      return;
+    }
+    if (!/^C-[A-Z0-9]+$/.test(code)) {
+      setJoinError('格式要像 C-78CR 这样哦');
+      return;
+    }
+    setJoinBusy(true);
+    try {
+      const info = await api.getCompanyInfo(code);
+      if (!info || !info.code) {
+        setJoinError('服务器没认出这家公司');
+        return;
+      }
+      saveCompanyLocal({
+        code: info.code,
+        name: info.name || info.code,
+        created_at: info.created_at || Date.now(),
+        invite_prompt: '',
+      });
+      setCompany(info.code);
+      onSelectCompany && onSelectCompany(info);
+      setJoinCode('');
+      setJoinError('');
+      setShowJoin(false);
+      toast(`欢迎来到 ${info.name}（${info.code}）`);
+      await loadCompanies(true);
+    } catch (e) {
+      const msg = e && e.message ? e.message : String(e);
+      setJoinError(msg.includes('HTTP 404') || /not found|不存在/i.test(msg)
+        ? `找不到 ${code}，再核对一下？`
+        : '加入失败: ' + msg);
+      toast('加入失败: ' + msg, true);
+    } finally {
+      setJoinBusy(false);
+    }
+  };
+
+  const select = async (item) => {
+    if (!item || !item.code) return;
+    try {
+      const info = await api.getCompanyInfo(item.code);
+      setCompany(info.code);
+      saveCompanyLocal({
+        ...item,
+        name: info.name || item.name,
+        created_at: info.created_at || item.created_at,
+      });
+      onSelectCompany && onSelectCompany(info);
+      toast(`已溜进 ${info.name}`);
+    } catch (e) {
+      setCompany(item.code);
+      onSelectCompany && onSelectCompany({ code: item.code, name: item.name });
+      toast('校验失败，仍已切换: ' + e.message, true);
+    }
+  };
+
+  const memberCount = agents ? agents.length : 0;
+  const selected = list.find((c) => c.code === currentCode)
+    || (currentCode ? { code: currentCode, name: (company && company.name) || currentCode } : null);
+
+  const saveProfile = async () => {
+    if (!currentCode) return;
+    setProfileBusy(true);
+    try {
+      const tags = String(editTags || '')
+        .split(/[,，\s]+/)
+        .map((x) => x.trim())
+        .filter(Boolean);
+      const updated = await api.updateCompany(currentCode, {
+        intro: editIntro,
+        tags,
+      });
+      updateSavedCompany(currentCode, {
+        intro: updated.intro || editIntro,
+        tags: updated.tags || tags,
+        name: updated.name,
+      });
+      await loadCompanies(true);
+      toast('公司简介 / 擅长已保存');
+    } catch (e) {
+      toast('保存失败: ' + e.message, true);
+    } finally {
+      setProfileBusy(false);
+    }
+  };
+
+  const createProxyInvite = async () => {
+    if (!currentCode) return;
+    setProfileBusy(true);
+    try {
+      const tags = String(editTags || '')
+        .split(/[,，\s]+/)
+        .map((x) => x.trim())
+        .filter(Boolean);
+      const lead = (agents || []).find((a) => a.role === 'lead') || (agents || [])[0];
+      const inv = await api.createInvite({
+        specialties: tags.length ? tags : ['video_gen'],
+        from: lead ? lead.doorplate : undefined,
+      });
+      if (inv && inv.prompt) {
+        setInvitePrompt(inv.prompt);
+        updateSavedCompany(currentCode, { invite_prompt: inv.prompt, last_invite_id: inv.invite_id });
+      }
+      toast(`代企业入驻邀请已创建 ${inv.invite_id}`);
+    } catch (e) {
+      toast('创建邀请失败: ' + e.message, true);
+    } finally {
+      setProfileBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-tabpane">
+      <h2 className="sec-title">
+        <span className="serif">🏢 公司窝</span>
+        <span className="sec-sub">开一家 · 选一家 · 把邀请词贴进 Muse</span>
+      </h2>
+
+      <div className="co-toolbar">
+        <button
+          type="button"
+          className={`btn co-btn-create${createPulse ? ' pulse' : ''}`}
+          onClick={createOne}
+          disabled={busy}
+        >
+          {busy ? '毛怪正在搭窝…' : '✨ 开一家公司'}
+        </button>
+        <button
+          type="button"
+          className={`btn btn-sm btn-ghost${showJoin ? ' co-ghost-on' : ''}`}
+          onClick={() => setShowJoin((v) => !v)}
+        >
+          🚪 用公司码加入
+        </button>
+        <button
+          type="button"
+          className="btn btn-sm btn-ghost"
+          onClick={() => loadCompanies(false)}
+          disabled={listLoading}
+        >
+          {listLoading ? '刷新中…' : '刷新'}
+        </button>
+        <input
+          type="search"
+          className="co-join-input"
+          style={{ maxWidth: 220, marginLeft: 4 }}
+          placeholder="搜索公司名 / 公司码…"
+          value={searchQ}
+          onChange={(e) => { setSearchQ(e.target.value); setPage(1); }}
+          aria-label="搜索公司"
+        />
+        {!!list.length && (
+          <span className="co-toolbar-meta">
+            显示 {visibleList.length}/{list.length} 家
+            {dormantHiddenN ? ` · 已隐藏 ${dormantHiddenN} 家休眠` : ''}
+            {String(searchQ || '').trim() ? ' · 含搜索到的休眠' : ' · 默认仅有心跳'}
+            {' · '}第 {page}/{totalPages} 页
+          </span>
+        )}
+      </div>
+
+      {showJoin && (
+        <div className="co-join-panel">
+          <div className="co-join-panel-art" aria-hidden>
+            <MonsterAvatar doorplate="join-buddy" size={40} />
+          </div>
+          <div className="co-join-panel-body">
+            <div className="co-join-panel-title">敲敲门，进去串门</div>
+            <div className="co-join">
+              <input
+                type="text"
+                value={joinCode}
+                onChange={(e) => {
+                  setJoinCode(e.target.value);
+                  if (joinError) setJoinError('');
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    joinByCode();
+                  }
+                }}
+                placeholder="C-78CR"
+                disabled={joinBusy}
+                autoCapitalize="characters"
+                className="co-join-input"
+                autoFocus
+              />
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={joinByCode}
+                disabled={joinBusy}
+              >
+                {joinBusy ? '查询中…' : '进去！'}
+              </button>
+            </div>
+            {joinError
+              ? <div className="co-join-err">{joinError}</div>
+              : <div className="co-join-hint">不区分大小写 · 对不上再问朋友要码</div>}
+          </div>
+        </div>
+      )}
+
+      {listLoading && !list.length && (
+        <div className="co-loading">
+          <MonsterAvatar doorplate="loading-spin" size={56} />
+          <span>毛怪正在翻花名册…</span>
+        </div>
+      )}
+      {!listLoading && listError && !list.length && (
+        <div className="empty-hint" style={{ color: 'var(--danger, #c0392b)' }}>
+          加载失败：{listError}
+        </div>
+      )}
+      {!listLoading && !listError && !list.length && <EmptyCompanions />}
+
+      {!!list.length && (
+        <>
+          {!pageItems.length && (
+            <div className="empty-hint" style={{ marginBottom: 12 }}>
+              {String(searchQ || '').trim()
+                ? '没有匹配的公司，换个名字或公司码试试'
+                : `当前没有有心跳的公司（已隐藏 ${dormantHiddenN} 家休眠）。在上方搜索公司名/公司码可找到休眠公司。`}
+            </div>
+          )}
+          <div className="co-grid">
+            {pageItems.map((item) => (
+              <CompanyCard
+                key={item.code}
+                item={item}
+                active={item.code === currentCode}
+                liveMembers={memberCount}
+                onSelect={select}
+              />
+            ))}
+          </div>
+
+          {totalPages > 1 && (
+            <nav className="co-pager" aria-label="公司分页">
+              <button
+                type="button"
+                className="btn btn-sm btn-ghost"
+                disabled={page <= 1}
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+              >
+                ← 上一页
+              </button>
+              <div className="co-pager-dots">
+                {Array.from({ length: totalPages }, (_, i) => i + 1).map((n) => (
+                  <button
+                    key={n}
+                    type="button"
+                    className={`co-dot${n === page ? ' on' : ''}`}
+                    onClick={() => setPage(n)}
+                    aria-label={`第 ${n} 页`}
+                    aria-current={n === page ? 'page' : undefined}
+                  >
+                    {n}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                className="btn btn-sm btn-ghost"
+                disabled={page >= totalPages}
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              >
+                下一页 →
+              </button>
+            </nav>
+          )}
+        </>
+      )}
+
+      {selected && (
+        <section className="co-profile">
+          <header className="co-invite-head">
+            <div>
+              <div className="co-invite-title">简介 · 擅长标签</div>
+              <div className="co-invite-sub">企业资料会在公司列表展示；代企业入驻邀请会带上擅长标签</div>
+            </div>
+            <div className="co-invite-actions">
+              <button type="button" className="btn btn-sm" onClick={saveProfile} disabled={profileBusy}>
+                {profileBusy ? '保存中…' : '保存资料'}
+              </button>
+              <button type="button" className="btn btn-sm btn-ghost" onClick={createProxyInvite} disabled={profileBusy}>
+                代企业入驻邀请
+              </button>
+            </div>
+          </header>
+          <div className="field co-invite-field">
+            <label>简介</label>
+            <textarea
+              rows={3}
+              value={editIntro}
+              onChange={(e) => setEditIntro(e.target.value)}
+              placeholder="一句话介绍这家公司擅长什么…"
+              className="co-invite-ta"
+            />
+          </div>
+          <div className="field co-invite-field" style={{ marginTop: 10 }}>
+            <label>擅长标签（逗号分隔，如 video_gen, edit）</label>
+            <input
+              type="text"
+              value={editTags}
+              onChange={(e) => setEditTags(e.target.value)}
+              placeholder="video_gen, edit"
+              className="co-join-input"
+              style={{ width: '100%' }}
+            />
+          </div>
+        </section>
+      )}
+
+      {selected && (
+        <section className="co-profile" style={{ marginTop: 12 }}>
+          <header className="co-invite-head">
+            <div>
+              <div className="co-invite-title">公司生命周期</div>
+              <div className="co-invite-sub">
+                状态：{(selected.status || (company && company.status) || 'active')}
+                {selected.heartbeat_dormant ? ' · 休眠公司（无员工心跳）' : ' · 有心跳'}
+                {' · '}手动休眠可重开；注销为终端态（走 prompt 渠道擦除 Muse）
+              </div>
+            </div>
+            <div className="co-invite-actions">
+              <button type="button" className="btn btn-sm btn-ghost" disabled={lifeBusy}
+                onClick={() => runLifecycle('suspend')}>公司休眠</button>
+              <button type="button" className="btn btn-sm" disabled={lifeBusy}
+                onClick={() => runLifecycle('resume')}>公司重开</button>
+              <button type="button" className="btn btn-sm btn-ghost" disabled={lifeBusy}
+                style={{ color: '#b42318' }}
+                onClick={() => runLifecycle('archive')}>公司注销</button>
+            </div>
+          </header>
+          {lifePrompt ? (
+            <div className="field co-invite-field" style={{ marginTop: 10 }}>
+              <label>生命周期 prompt（可经 invite-mcp 投递给已登录 Muse）</label>
+              <textarea rows={6} readOnly value={lifePrompt} className="co-invite-ta" />
+              <button type="button" className="btn btn-sm" style={{ marginTop: 8 }}
+                onClick={() => copy(lifePrompt, '生命周期 prompt 已复制')}>复制 prompt</button>
+            </div>
+          ) : null}
+        </section>
+      )}
+
+      {selected && (
+        <section className="co-invite">
+          <header className="co-invite-head">
+            <div className="co-invite-identity">
+              <MonsterAvatar doorplate={selected.code} size={44} />
+              <div>
+                <div className="co-invite-title">{selected.name || selected.code}</div>
+                <div className="co-invite-sub">
+                  <span className="co-code-badge">{selected.code}</span>
+                  <span>🐾 {memberCount} 只毛怪</span>
+                </div>
+              </div>
+            </div>
+            <div className="co-invite-actions">
+              <button
+                type="button"
+                className="btn btn-sm btn-ghost"
+                onClick={() => copy(currentCode, '公司码已复制 📋')}
+              >
+                复制码
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => copy(invitePrompt, '邀请词已复制，去 Muse 粘贴 🚪')}
+                disabled={!invitePrompt || inviteLoading}
+              >
+                复制邀请词
+              </button>
+            </div>
+          </header>
+          <div className="field co-invite-field">
+            <label>邀请词 · 贴进 Muse 就能报到</label>
+            {inviteLoading && !invitePrompt ? (
+              <div className="empty-hint" style={{ padding: 16 }}>毛怪正在写邀请信…</div>
+            ) : (
+              <textarea
+                rows={9}
+                readOnly
+                value={invitePrompt}
+                className="co-invite-ta"
+              />
+            )}
+          </div>
+        </section>
+      )}
+
+      {!selected && !!list.length && (
+        <div className="co-hint-pick">点一张卡片进窝，再复制邀请词叫小伙伴</div>
+      )}
+    </div>
+  );
+}

@@ -1,22 +1,65 @@
-// Muse Teams —— 主应用
+// Muse Teams —— 主应用（v3：进站直达工作台 + 公司管理 + hash 路由）
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { api, getCompany, setCompany } from './api.js';
 import Sidebar from './components/Sidebar.jsx';
-import Landing from './components/Landing.jsx';
+import MonsterAvatar from './components/MonsterAvatar.jsx';
 import { PublishTaskModal, InviteModal, ArtifactModal } from './components/Modals.jsx';
 import LivingRoom from './tabs/LivingRoom.jsx';
 import Tasks from './tabs/Tasks.jsx';
 import Members from './tabs/Members.jsx';
 import Artifacts from './tabs/Artifacts.jsx';
 import Activity from './tabs/Activity.jsx';
+import Companies from './tabs/Companies.jsx';
+import ClaimPlaza from './tabs/ClaimPlaza.jsx';
+import Trace from './tabs/Trace.jsx';
+import Receipts from './tabs/Receipts.jsx';
 import { agentStatus } from './components/Creature.jsx';
 import { artIcon } from './components/Modals.jsx';
 import { deliverCelebration } from './anim.js';
 import './animations.css';
 import './design.css';
 
+const TAB_TO_HASH = {
+  companies: 'companies',
+  home: 'home',
+  plaza: 'plaza',
+  tasks: 'tasks',
+  agents: 'team',
+  arts: 'arts',
+  feed: 'feed',
+  trace: 'trace',
+  receipts: 'receipts',
+};
+const HASH_TO_TAB = Object.fromEntries(
+  Object.entries(TAB_TO_HASH).map(([tab, hash]) => [hash, tab])
+);
+
+function tabFromHash() {
+  const raw = (typeof location !== 'undefined' ? location.hash : '') || '';
+  const key = raw.replace(/^#/, '').split(/[?/]/)[0].trim().toLowerCase();
+  if (key && HASH_TO_TAB[key]) return HASH_TO_TAB[key];
+  return getCompany() ? 'home' : 'companies';
+}
+
+function setHashForTab(tab) {
+  const hash = TAB_TO_HASH[tab] || 'home';
+  if (typeof location === 'undefined') return;
+  // Preserve #trace/T-xxxx deep link when staying on trace
+  if (tab === 'trace') {
+    const cur = (location.hash || '').replace(/^#/, '');
+    if (cur === 'trace' || cur.startsWith('trace/') || cur.startsWith('trace?')) return;
+  }
+  const next = '#' + hash;
+  if (location.hash === next) return;
+  try {
+    history.replaceState(null, '', next);
+  } catch (_) {
+    location.hash = hash;
+  }
+}
+
 export default function App() {
-  const [tab, setTab] = useState('home');
+  const [tab, setTab] = useState(() => tabFromHash());
   const [company, setCompanyInfo] = useState(null); // {code, name} | null
   const [agents, setAgents] = useState([]);
   const [tasks, setTasks] = useState([]);
@@ -26,12 +69,43 @@ export default function App() {
   const [showInvite, setShowInvite] = useState(false);
   const [artView, setArtView] = useState(null); // {task, idx}
   const [toastMsg, setToastMsg] = useState(null);
+  const [traceTaskId, setTraceTaskId] = useState(null);
   const toastTimer = useRef(null);
 
   const toast = useCallback((msg, isErr) => {
     setToastMsg({ msg, isErr: !!isErr });
     clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToastMsg(null), 2800);
+  }, []);
+
+  const switchTab = useCallback((next) => {
+    setTab(next);
+    setHashForTab(next);
+  }, []);
+
+  const openTrace = useCallback((taskId) => {
+    const id = taskId ? String(taskId).trim().toUpperCase() : '';
+    setTraceTaskId(id || null);
+    setTab('trace');
+    try {
+      history.replaceState(null, '', id ? `#trace/${encodeURIComponent(id)}` : '#trace');
+    } catch (_) {
+      location.hash = id ? `trace/${id}` : 'trace';
+    }
+  }, []);
+
+  // hash ↔ tab
+  useEffect(() => {
+    setHashForTab(tab);
+  }, [tab]);
+
+  useEffect(() => {
+    const onHash = () => {
+      const next = tabFromHash();
+      setTab((cur) => (cur === next ? cur : next));
+    };
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
   const refresh = useCallback(async (silent) => {
@@ -47,7 +121,7 @@ export default function App() {
     }
   }, [toast]);
 
-  // 启动时：有公司码则校验并进入，否则停在公司入口
+  // 启动时：有当前公司码则校验；无效则清空，仍留在工作台
   useEffect(() => {
     const c = getCompany();
     if (!c) return;
@@ -57,7 +131,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!company) return;
+    if (!company) {
+      setConnected(false);
+      setAgents([]); setTasks([]); setFeed([]);
+      return;
+    }
     refresh(false);
     const h = setInterval(() => refresh(true), 15000);
     return () => clearInterval(h);
@@ -67,19 +145,28 @@ export default function App() {
     setCompany('');
     setCompanyInfo(null);
     setAgents([]); setTasks([]); setFeed([]); setConnected(false);
+    switchTab('companies');
+  };
+
+  const onSelectCompany = (info) => {
+    setCompanyInfo(info);
+    setAgents([]); setTasks([]); setFeed([]); setConnected(false);
   };
 
   const online = agents.filter((a) => agentStatus(a) === 'online').length;
   const busy = agents.filter((a) => agentStatus(a) === 'busy').length;
   const pendingN = tasks.filter((t) => t.status === 'pending').length;
-  const reviewN = tasks.filter((t) => t.status === 'review' || t.status === 'done-pending-review').length;
+  const coCode = company?.code || '';
+  const reviewN = tasks.filter((t) =>
+    (t.status === 'review' || t.status === 'done-pending-review') &&
+    (!coCode || t.company === coCode)
+  ).length;
 
   const openArtifact = (taskId, idx) => {
     const t = tasks.find((x) => x.id === taskId);
     if (t) setArtView({ task: t, idx });
   };
 
-  // 任务 tab 通过验收后的庆祝（客厅不在前台时降级为普通刷新）
   const handleCelebrate = (taskId) => {
     const t = tasks.find((x) => x.id === taskId);
     const cel = t && t.owner
@@ -100,74 +187,139 @@ export default function App() {
     }
   };
 
+  const needCompanyHint = (
+    <div className="mt-empty">
+      <div className="mt-empty-art" aria-hidden>
+        <MonsterAvatar doorplate="need-co" size={72} />
+      </div>
+      <div className="mt-empty-title serif">先选一个公司窝</div>
+      <div className="mt-empty-sub">去左侧「公司窝」创建或加入，再回来看客厅和任务～</div>
+      <button type="button" className="btn co-btn-create" style={{ marginTop: 12 }} onClick={() => switchTab('companies')}>
+        去公司窝 →
+      </button>
+    </div>
+  );
 
   return (
     <>
-      {company ? (
-      <>
       <header className="topbar">
         <div className="logo">
-          <div className="logo-mark serif">M</div>
+          <div className="logo-mark serif" aria-hidden>M</div>
           <div>
             <div className="logo-name serif">Muse Teams</div>
-            <div className="logo-sub"><span className="mt-live-dot" />毛怪客厅 · live</div>
+            <div className="logo-sub"><span className="mt-live-dot" />毛怪协作窝 · live</div>
           </div>
         </div>
-        <div className="reg-pill" title="公司码：发给新成员入驻用">
-          🏢 {company.name} <code>{company.code}</code>
-          <button onClick={() => { try { navigator.clipboard.writeText(company.code); toast('公司码已复制 📋'); } catch (e) {} }}>复制码</button>
-          <button onClick={switchCompany} title="切换公司">切换</button>
-        </div>
+        {company ? (
+          <div className="reg-pill" title="公司码：发给新成员入驻用">
+            <MonsterAvatar doorplate={company.code} size={26} />
+            <span className="reg-pill-name">{company.name}</span>
+            <code>{company.code}</code>
+            <button onClick={() => { try { navigator.clipboard.writeText(company.code); toast('公司码已复制 📋'); } catch (e) {} }}>复制码</button>
+            <button onClick={switchCompany} title="切换公司">换窝</button>
+          </div>
+        ) : (
+          <div className="reg-pill">
+            还没进窝
+            <button onClick={() => switchTab('companies')}>开一家</button>
+          </div>
+        )}
         <div className="chips">
-          <span className="chip">🛋️ 等候 <b>{online}</b></span>
-          <span className="chip">✈️ 待领 <b>{pendingN}</b></span>
-          <span className={`chip${busy ? ' hot' : ''}`}>🏃 忙碌 <b>{busy}</b></span>
-          <span className={`chip${reviewN ? ' hot' : ''}`}>📦 交付 <b>{reviewN}</b></span>
+          <span className="chip">🛋️ 在线 <b>{online}</b></span>
+          <span className="chip">✈️ 纸飞机 <b>{pendingN}</b></span>
+          <span className={`chip${busy ? ' hot' : ''}`}>🏃 干活 <b>{busy}</b></span>
+          <span className={`chip${reviewN ? ' hot' : ''}`}>📦 待收 <b>{reviewN}</b></span>
         </div>
         <div className="top-actions">
-          <button className="btn btn-sm btn-ghost" onClick={() => setShowInvite(true)}>🚪 邀请</button>
-          <button className="btn btn-sm" onClick={() => setShowPublish(true)}>📤 发布任务</button>
+          <button className="btn btn-sm btn-ghost" onClick={() => setShowInvite(true)} disabled={!company}>🚪 邀请</button>
+          <button className="btn btn-sm" onClick={() => setShowPublish(true)} disabled={!company}>📤 扔纸飞机</button>
         </div>
       </header>
 
       <div className="app-layout">
-        <Sidebar tab={tab} onSwitch={setTab} />
+        <Sidebar tab={tab} onSwitch={switchTab} />
         <main className="main">
-          {!connected && <div className="empty-hint">连接中…</div>}
+          {tab === 'companies' && (
+            <Companies
+              company={company}
+              agents={agents}
+              onSelectCompany={onSelectCompany}
+              onToast={toast}
+            />
+          )}
+
+          {/* 员工页自管全公司加载，不依赖当前公司 / connected */}
+          {tab === 'agents' && (
+            <Members
+              company={company}
+              onSelectCompany={onSelectCompany}
+              onToast={toast}
+            />
+          )}
+
+          {tab !== 'companies' && tab !== 'agents' && tab !== 'trace' && !company && needCompanyHint}
+
+          {tab !== 'companies' && tab !== 'agents' && tab !== 'trace' && company && !connected && (
+            <div className="empty-hint">连接中…</div>
+          )}
+
+          {connected && tab === 'plaza' && (
+            <ClaimPlaza
+              company={company}
+              agents={agents}
+              onToast={toast}
+              onRefresh={() => refresh(true)}
+              onGotoCompany={async (code) => {
+                if (!code) return;
+                try {
+                  const info = await api.getCompanyInfo(code);
+                  setCompany(info.code);
+                  setCompanyInfo(info);
+                  switchTab('home');
+                  toast(`已切换到 ${info.name || info.code} 的客厅`);
+                } catch (e) {
+                  toast('切换公司失败: ' + e.message, true);
+                }
+              }}
+            />
+          )}
           {connected && tab === 'home' && (
             <LivingRoom
+              company={company}
               agents={agents} tasks={tasks} feed={feed}
               onToast={toast} onRefresh={() => refresh(true)}
               onOpenInvite={() => setShowInvite(true)}
+              onOpenPublish={() => setShowPublish(true)}
               onOpenArtifact={openArtifact}
               onOpenMailbox={() => {}}
               onSendMsg={sendMsg}
             />
           )}
           {connected && tab === 'tasks' && (
-            <Tasks tasks={tasks} agents={agents} onToast={toast}
+            <Tasks tasks={tasks} agents={agents} company={company} onToast={toast}
               onRefresh={() => refresh(true)} onOpenArtifact={openArtifact}
-              onCelebrate={handleCelebrate} />
+              onCelebrate={handleCelebrate} onOpenTrace={openTrace} />
           )}
-          {connected && tab === 'agents' && <Members agents={agents} tasks={tasks} onRefresh={() => refresh(true)} />}
           {connected && tab === 'arts' && (
             <Artifacts tasks={tasks} agents={agents} onOpenArtifact={openArtifact} />
           )}
           {connected && tab === 'feed' && <Activity feed={feed} />}
+          {tab === 'receipts' && (
+            <Receipts agents={agents} onToast={toast} />
+          )}
+          {tab === 'trace' && (
+            <Trace company={company} onToast={toast} initialTaskId={traceTaskId} />
+          )}
         </main>
       </div>
 
       <PublishTaskModal show={showPublish} onClose={() => setShowPublish(false)}
-        onCreated={() => refresh(true)} toast={toast} />
+        onCreated={() => refresh(true)} toast={toast} agents={agents} />
       <InviteModal show={showInvite} onClose={() => setShowInvite(false)} toast={toast} />
       <ArtifactModal show={!!artView} onClose={() => setArtView(null)}
         task={artView && artView.task} artIndex={artView ? artView.idx : -1} />
 
       {toastMsg && <div className={`toast show${toastMsg.isErr ? ' err' : ''}`}>{toastMsg.msg}</div>}
-      </>)
-      : (
-        <Landing onEnter={(info) => setCompanyInfo(info)} />
-      )}
     </>
   );
 }

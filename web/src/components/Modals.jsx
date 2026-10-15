@@ -12,12 +12,19 @@ function ModalBg({ show, onClose, children, wide }) {
 }
 
 /* ---------- 发布任务 ---------- */
-export function PublishTaskModal({ show, onClose, onCreated, toast }) {
+export function PublishTaskModal({ show, onClose, onCreated, toast, agents }) {
   const [tplKey, setTplKey] = useState('');
   const [title, setTitle] = useState('');
   const [desc, setDesc] = useState('');
   const [pri, setPri] = useState('P1');
+  const [assignTo, setAssignTo] = useState('');
   const [busy, setBusy] = useState(false);
+  const roster = Array.isArray(agents) ? agents : [];
+
+  useEffect(() => {
+    if (!show) return;
+    setAssignTo('');
+  }, [show]);
 
   const applyTpl = (k) => {
     setTplKey(k);
@@ -33,10 +40,16 @@ export function PublishTaskModal({ show, onClose, onCreated, toast }) {
     if (!title.trim()) { toast('先填个标题', true); return; }
     setBusy(true);
     try {
-      await api.createTask({ title: title.trim(), desc: desc.trim(), priority: pri });
-      setTitle(''); setDesc(''); setTplKey(''); setPri('P1');
+      const task = await api.createTask({
+        title: title.trim(),
+        desc: desc.trim(),
+        priority: pri,
+        ...(assignTo ? { assign_to: assignTo } : {}),
+      });
+      setTitle(''); setDesc(''); setTplKey(''); setPri('P1'); setAssignTo('');
       onClose();
-      toast('✈️ 纸飞机折好啦，马上从窗口飞进来！');
+      if (assignTo) toast(`🎯 已直派给 ${assignTo} · ${task?.id || ''}`);
+      else toast('✈️ 纸飞机折好啦，马上从窗口飞进来！');
       if (onCreated) onCreated();
     } catch (e) {
       toast('发布失败: ' + e.message, true);
@@ -45,10 +58,14 @@ export function PublishTaskModal({ show, onClose, onCreated, toast }) {
     }
   };
 
+  const assignLabel = assignTo
+    ? (roster.find((a) => a.doorplate === assignTo)?.name || assignTo)
+    : '';
+
   return (
     <ModalBg show={show} onClose={onClose}>
       <h2 className="serif">📤 发布任务</h2>
-      <div className="msub">写张纸条，折成纸飞机从窗口飞进客厅</div>
+      <div className="msub">写张纸条，折成纸飞机从窗口飞进客厅；可选直派指定员工</div>
       <div className="field">
         <label>任务模板</label>
         <select value={tplKey} onChange={(e) => applyTpl(e.target.value)}>
@@ -74,9 +91,22 @@ export function PublishTaskModal({ show, onClose, onCreated, toast }) {
           <option value="P2">P2 低</option>
         </select>
       </div>
+      <div className="field">
+        <label>指定员工（可选 · 留空=扔进广场）</label>
+        <select value={assignTo} onChange={(e) => setAssignTo(e.target.value)}>
+          <option value="">不指定 · 扔进广场抢单</option>
+          {roster.map((a) => (
+            <option key={a.doorplate} value={a.doorplate}>
+              {(a.name || a.doorplate) + ' · ' + a.doorplate}
+            </option>
+          ))}
+        </select>
+      </div>
       <div className="row">
         <button className="btn btn-ghost" onClick={onClose}>取消</button>
-        <button className="btn" onClick={submit} disabled={busy}>折成飞机扔出去 ✈️</button>
+        <button className="btn" onClick={submit} disabled={busy}>
+          {assignTo ? `直派给 ${assignLabel} 🎯` : '折成飞机扔出去 ✈️'}
+        </button>
       </div>
     </ModalBg>
   );
@@ -115,7 +145,16 @@ export function InviteModal({ show, onClose, toast }) {
     catch (e) { toast('复制失败，请手动选择复制', true); }
   };
 
-  const delegateText = `帮我加个 Muse Teams worker${dName.trim() ? `，名字叫「${dName.trim()}」` : '，名字你随机起个可爱的'}，角色是${role ? `「${role}」` : '无预设（你看着定）'}。你负责创建旁聊、拿到门牌号后加入 workers.json 并告诉我门牌号和名字，全程不用我动手。
+  const companyCode = getCompany() || '<本公司码>';
+  const workersFile = `workers-${companyCode}.json`;
+  const delegateText = `帮我加个 Muse Teams worker${dName.trim() ? `，名字叫「${dName.trim()}」` : '，名字你随机起个可爱的'}，角色是${role ? `「${role}」` : '无预设（你看着定）'}。公司码是 ${companyCode}。
+
+你负责创建旁聊；拿到门牌号后，无需我确认立刻执行：
+① 把门牌号→旁聊 chat_id 写入本公司专属名单 ${workersFile}（不要写入 C-0001 的名单，也不要用裸的 workers.json 混用）；
+② 为本公司创建专属调度器（cron 每 2 分钟：对账、心跳、自动验收、扫单认领、派单到窗口、查信），与其他公司调度器完全独立；调度器必须对该名单每个 worker 调 teams_heartbeat / POST /api/agents/heartbeat（带 doorplate + company_code），超过 180 秒无心跳会显示休眠；
+③ 完成后跟我说一句：「调度器已创建并接管，门牌号 <doorplate> 心跳正常」。
+
+【强制】旁聊调 teams_register / teams_redeem_invite 时必须同时传 muse_account（当前登录 Muse 账号）和 muse_session（本旁聊会话名），两者都存进员工档案，方便从门牌反查是哪个 Muse。
 
 创建旁聊后，把下面这段完整注册 prompt 原样发到旁聊里（不要改、不要缩写）：
 

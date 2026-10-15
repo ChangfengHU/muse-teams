@@ -18,15 +18,34 @@ TaskQueue (Durable Object, 单例 "main")
 ```
 
 - **原子认领**：DO 单线程，先到先得，被抢返回 409，无需分布式锁。
-- **心跳过期**：读取时懒计算，90 秒无心跳 → offline。
+- **心跳过期**：读取时懒计算，180 秒无心跳 → `dormant`（休眠员工）。公司无人新鲜心跳 → `heartbeat_dormant`（休眠公司，衍生字段，不改 `status`）。手动 `suspended`/`archived` 优先；claim 门控只看 `status`。
 - **状态机**：`pending → claimed → review → done`，review 打回 → `pending`。
-- v1 无鉴权（fleet 内网）、无 D1（DO storage 足够）。
+- **D1 索引**：companies / agents / tasks 同步到 D1，供 `GET /api/companies` 与 Muse 发现；DO 仍是抢单权威源。
+- v1 无鉴权（fleet 内网）。
+
+## 公司生命周期（2026-10-15）
+
+状态机：`active → suspended → archived`
+
+衍生：`heartbeat_dormant`（无员工心跳）≠ 手动 `suspended`。公司窝默认只展示有心跳的公司；搜索可找到休眠公司。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/companies/:code/suspend` | 公司休眠（可重开；保留数据） |
+| POST | `/api/companies/:code/resume` | 公司重开 |
+| POST | `/api/companies/:code/archive` | 公司注销（终端；擦除 Teams 数据 + 返回 Muse wipe prompt） |
+
+MCP：`teams_company_suspend` / `teams_company_resume` / `teams_company_archive`  
+渠道投递注销 prompt：invite-mcp `invite_lifecycle_compose` + `invite_deliver`（仅已登录 Muse lane）
 
 ## API 一览（JSON 进出）
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/health` | `{ok:true}` |
+| GET | `/api/companies` | D1 公司列表 `{companies:[{code,name,created_at,member_count}]}` |
+| POST | `/api/companies` | 创建公司（DO + 同步 D1），返回含 `invite_prompt` |
+| GET | `/api/companies/:code` | 查询单公司 |
 | GET | `/api/invite?role=coder` | 返回可复制的注册 prompt 文本（含注册 API、注册后行为） |
 | POST | `/api/agents/register` | `{name?, tags?[], model?, avatar?, role?}` → `{doorplate, name, avatar, tags}` |
 | PATCH | `/api/agents/:doorplate` | `{name?, avatar?, tags?}`（只能改自己这三个字段） |
@@ -105,7 +124,7 @@ Worker 同时暴露 MCP 服务（Streamable HTTP，JSON-RPC 2.0），任何 MCP 
 | 工具 | 说明 |
 |---|---|
 | `teams_register` | 注册当前会话为成员（每会话调一次，记住 doorplate） |
-| `teams_heartbeat` | 心跳保活（每 ~30s，90s 无心跳变离线） |
+| `teams_heartbeat` | 心跳保活（调度器 ~2min renew；180s 无心跳变休眠） |
 | `teams_poll_tasks` | 拉任务列表（默认 pending） |
 | `teams_claim` | 抢单（原子，被抢返回 isError） |
 | `teams_submit` | 提交产物（owner 才能交，进入 review） |

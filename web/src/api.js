@@ -4,6 +4,7 @@
 
 const API = 'https://teams.vyibc.com';
 const COMPANY_KEY = 'muse-teams-company';
+const COMPANY_LIST_KEY = 'muse-teams-companies';
 
 export function getCompany() {
   return localStorage.getItem(COMPANY_KEY) || '';
@@ -12,9 +13,45 @@ export function setCompany(code) {
   if (code) localStorage.setItem(COMPANY_KEY, code.trim().toUpperCase());
   else localStorage.removeItem(COMPANY_KEY);
 }
+
+/** 可选：本机缓存邀请词 / 最近选中；公司列表以服务端 D1 为准 */
+export function listSavedCompanies() {
+  try {
+    const raw = localStorage.getItem(COMPANY_LIST_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr : [];
+  } catch (_) {
+    return [];
+  }
+}
+export function saveCompanyLocal(entry) {
+  if (!entry || !entry.code) return listSavedCompanies();
+  const code = String(entry.code).trim().toUpperCase();
+  const list = listSavedCompanies().filter((c) => c.code !== code);
+  list.unshift({
+    code,
+    name: entry.name || code,
+    created_at: entry.created_at || Date.now(),
+    invite_prompt: entry.invite_prompt || '',
+    member_count: entry.member_count,
+    intro: entry.intro || entry.blurb || '',
+    tags: Array.isArray(entry.tags) ? entry.tags : (entry.specialties || []),
+  });
+  localStorage.setItem(COMPANY_LIST_KEY, JSON.stringify(list));
+  return list;
+}
+export function updateSavedCompany(code, patch) {
+  const c = String(code || '').trim().toUpperCase();
+  const list = listSavedCompanies().map((item) =>
+    item.code === c ? { ...item, ...patch, code: item.code } : item
+  );
+  localStorage.setItem(COMPANY_LIST_KEY, JSON.stringify(list));
+  return list;
+}
+
 function needCompany() {
   const c = getCompany();
-  if (!c) throw new Error('请先选择公司（输入公司码进入）');
+  if (!c) throw new Error('请先在「公司」里创建或选择公司');
   return c;
 }
 
@@ -43,14 +80,76 @@ return data;
 }
 
 export const api = {
-// 公司
-createCompany: (name) =>
-  request('/api/companies', 'POST', { name }),
+// 公司（列表来自 Worker D1，不再依赖本机 localStorage）
+listCompanies: () => request('/api/companies'),
+createCompany: (nameOrOpts) => {
+  let body = {};
+  if (typeof nameOrOpts === 'string' && nameOrOpts.trim()) body = { name: nameOrOpts.trim() };
+  else if (nameOrOpts && typeof nameOrOpts === 'object') body = { ...nameOrOpts };
+  return request('/api/companies', 'POST', body);
+},
+updateCompany: (code, patch) =>
+  request(`/api/companies/${encodeURIComponent(String(code).trim().toUpperCase())}`, 'PATCH', patch || {}),
 getCompanyInfo: (code) =>
   request(`/api/companies/${encodeURIComponent(code.trim().toUpperCase())}`),
+listReceipts: ({ doorplate, type = 'all', unread_only = false, mark_read = false } = {}) => {
+  const c = needCompany();
+  const q = new URLSearchParams({
+    doorplate,
+    company: c,
+    type,
+  });
+  if (unread_only) q.set('unread_only', '1');
+  if (mark_read) q.set('mark_read', '1');
+  return request(`/api/receipts?${q}`);
+},
+markReceiptRead: (receiptId, doorplate) =>
+  request(`/api/receipts/${encodeURIComponent(receiptId)}/read`, 'POST', {
+    doorplate,
+    company_code: needCompany(),
+  }),
+createInvite: ({ role, specialties, from, target_hint, note } = {}) =>
+  request('/api/invites', 'POST', {
+    company_code: needCompany(),
+    ...(role ? { role } : {}),
+    ...(specialties ? { specialties } : {}),
+    ...(from ? { from } : {}),
+    ...(target_hint ? { target_hint } : {}),
+    ...(note ? { note } : {}),
+  }),
+getInvite: (inviteId) => request(`/api/invites/${encodeURIComponent(inviteId)}`),
+
+/** 公司级续约：调度器用 workers-<code>.json 全部门牌号一次刷新心跳 */
+companyRenew: (code, doorplates, from) =>
+  request(`/api/companies/${encodeURIComponent(String(code).trim().toUpperCase())}/renew`, 'POST', {
+    doorplates: doorplates || [],
+    ...(from ? { from } : {}),
+  }),
+
+/** 公司休眠：active→suspended（可重开） */
+companySuspend: (code, from) =>
+  request(`/api/companies/${encodeURIComponent(String(code).trim().toUpperCase())}/suspend`, 'POST', {
+    ...(from ? { from } : {}),
+  }),
+/** 公司重开：suspended→active */
+companyResume: (code, from) =>
+  request(`/api/companies/${encodeURIComponent(String(code).trim().toUpperCase())}/resume`, 'POST', {
+    ...(from ? { from } : {}),
+  }),
+/** 公司注销：终端态，不可重开 */
+companyArchive: (code, from) =>
+  request(`/api/companies/${encodeURIComponent(String(code).trim().toUpperCase())}/archive`, 'POST', {
+    ...(from ? { from } : {}),
+  }),
 
 // 只读（全部按公司过滤）
 agents: () => request(`/api/agents?company=${encodeURIComponent(needCompany())}`),
+/** 按公司码拉员工，不读写当前选中公司 */
+agentsFor: (code) => {
+  const c = String(code || '').trim().toUpperCase();
+  if (!c) throw new Error('需要公司码');
+  return request(`/api/agents?company=${encodeURIComponent(c)}`);
+},
 tasks: (status) => request(`/api/tasks?status=${status}&company=${encodeURIComponent(needCompany())}`),
 feed: () => request(`/api/feed?company=${encodeURIComponent(needCompany())}`),
 invite: (role) => {
@@ -60,18 +159,60 @@ invite: (role) => {
 health: () => request('/api/health'),
 
 // 写入（全部带公司码）
-createTask: ({ title, desc, priority }) =>
-  request('/api/tasks', 'POST', { title, desc, priority, company_code: needCompany() }),
+createTask: ({ title, desc, priority, task_type, prompts, acceptance, assign_to }) =>
+  request('/api/tasks', 'POST', {
+    title, desc, priority,
+    ...(task_type ? { task_type } : {}),
+    ...(prompts != null ? { prompts } : {}),
+    ...(acceptance != null ? { acceptance } : {}),
+    ...(assign_to ? { assign_to } : {}),
+    company_code: needCompany(),
+  }),
+/** 手动发「视频生成」单：prompts 为数组或换行分隔字符串；title 可空由服务端按提示词生成；assign_to 直派跳过广场 */
+createVideoGenTask: ({ title, prompts, priority, desc, acceptance, assign_to }) =>
+  request('/api/tasks', 'POST', {
+    ...(title && String(title).trim() ? { title: String(title).trim() } : {}),
+    prompts,
+    priority: priority || 'P1',
+    task_type: 'video_gen',
+    ...(desc != null ? { desc } : {}),
+    ...(acceptance != null ? { acceptance } : {}),
+    ...(assign_to ? { assign_to } : {}),
+    company_code: needCompany(),
+  }),
+/** 抢单广场：pending/claimed 跨公司；status=review 须传 company（发单方），否则后端返回空 */
+plaza: ({ status = 'pending', task_type = 'video_gen', company } = {}) => {
+  const q = new URLSearchParams();
+  if (status) q.set('status', status);
+  if (task_type) q.set('task_type', task_type);
+  if (company) q.set('company', company);
+  return request(`/api/plaza?${q.toString()}`);
+},
+getTask: (taskId) => request(`/api/tasks/${encodeURIComponent(taskId)}`),
+  /** 一单生命周期链路：created → plaza → claimed → submitted → reviewed */
+  getTaskTrace: (taskId) => request(`/api/tasks/${encodeURIComponent(taskId)}/trace`),
 claimTask: (taskId, doorplate) =>
   request(`/api/tasks/${encodeURIComponent(taskId)}/claim`, 'POST', { doorplate, company_code: needCompany() }),
 submitTask: (taskId, doorplate, artifacts) =>
   request(`/api/tasks/${encodeURIComponent(taskId)}/submit`, 'POST', { doorplate, artifacts, company_code: needCompany() }),
+/** 提交视频生成结果 JSON（claimant 公司身份） */
+submitTaskResult: (taskId, doorplate, result, artifacts) =>
+  request(`/api/tasks/${encodeURIComponent(taskId)}/submit`, 'POST', {
+    doorplate,
+    result,
+    ...(artifacts ? { artifacts } : {}),
+    company_code: needCompany(),
+  }),
 reviewTask: (taskId, approved, note) =>
   request(`/api/tasks/${encodeURIComponent(taskId)}/review`, 'POST', { approved, note, company_code: needCompany() }),
 deleteTask: (taskId, from) =>
   request(`/api/tasks/${encodeURIComponent(taskId)}?company=${encodeURIComponent(needCompany())}&from=${encodeURIComponent(from)}`, 'DELETE'),
-deleteAgent: (doorplate, from) =>
-  request(`/api/agents/${encodeURIComponent(doorplate)}?company=${encodeURIComponent(needCompany())}&from=${encodeURIComponent(from)}`, 'DELETE'),
+deleteAgent: (doorplate, from, companyCode) => {
+  const c = (companyCode && String(companyCode).trim())
+    ? String(companyCode).trim().toUpperCase()
+    : needCompany();
+  return request(`/api/agents/${encodeURIComponent(doorplate)}?company=${encodeURIComponent(c)}&from=${encodeURIComponent(from)}`, 'DELETE');
+},
 sendMail: ({ from, to, text, task_id }) =>
   request('/api/mail/send', 'POST', { from, to, text, task_id, company_code: needCompany() }),
 broadcast: (from, text) =>
@@ -122,15 +263,40 @@ month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
 });
 }
 
+/** 上次心跳展示：相对 + 绝对；与后端 HEARTBEAT_TTL 180s 对齐判断由调用方做 dormant */
+export function heartbeatLabel(ts) {
+  if (!ts) return '从未（超过 180 秒无心跳会显示休眠）';
+  const abs = new Date(ts).toLocaleString('zh-CN', {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  });
+  return `${relTime(ts)} / ${abs}`;
+}
+
+
 export function durStr(ms) {
-if (ms == null || ms < 0) return '';
-const s = Math.floor(ms / 1000);
-if (s < 60) return s + ' 秒';
-const m = Math.floor(s / 60);
-if (m < 60) return m + ' 分钟';
-const h = Math.floor(m / 60);
-if (h < 48) return h + ' 小时';
-return Math.floor(h / 24) + ' 天';
+  if (ms == null || ms < 0) return '';
+  if (ms < 1000) return ms + ' 毫秒';
+  const s = ms / 1000;
+  if (s < 60) {
+    const rounded = Math.abs(s - Math.round(s)) < 0.05 ? Math.round(s) : Number(s.toFixed(1));
+    return rounded + ' 秒';
+  }
+  const m = s / 60;
+  if (m < 60) {
+    const rounded = m < 10 && Math.abs(m - Math.round(m)) >= 0.05
+      ? Number(m.toFixed(1))
+      : Math.round(m);
+    return rounded + ' 分钟';
+  }
+  const h = m / 60;
+  if (h < 48) {
+    const rounded = h < 10 && Math.abs(h - Math.round(h)) >= 0.05
+      ? Number(h.toFixed(1))
+      : Math.round(h);
+    return rounded + ' 小时';
+  }
+  return Math.floor(h / 24) + ' 天';
 }
 
 export function esc(s) {
@@ -154,6 +320,15 @@ return s === 'done-pending-review'? 'review': s;
 
 // ---------- 任务模板 ----------
 export const TASK_TEMPLATES = {
+video_gen: {
+label: '🎬 视频生成',
+title: '视频生成：',
+pri: 'P1',
+desc: `（广场请用「发视频单」；此处模板仅备用）
+
+按提示词各生成一条视频，提交 JSON：
+[{ "prompt": "...", "video_url": "https://...", "asset_id": "optional", "meta": {} }]`,
+},
 img: {
 label: '🎨 生图任务',
 title: '生图：',
