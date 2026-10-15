@@ -52,7 +52,7 @@ async function discoverLoggedInMuseTargets(env) {
     const res = await fetch(fleetUrl, {
       headers: {
         accept: "application/json",
-        "user-agent": "muse-teams-invite/0.3.1",
+        "user-agent": "muse-teams-invite/0.3.2",
         ...(env.FLEET_API_TOKEN ? { authorization: `Bearer ${env.FLEET_API_TOKEN}` } : {}),
       },
     });
@@ -199,7 +199,7 @@ const TOOLS = [
   {
     name: "invite_deliver",
     description:
-      "Deliver a prompt to a logged-in Muse lane target. Accepts invite_id (fetch invite.prompt) OR prompt+kind (invite|suspend|archive|resume). Refuses non-deliverable / non-logged-in targets. Preferred inject: POST target.serviceBase/browser/run with Bearer IMGGEN_TOKEN (same Muse channel as 生图 MCP); MUSE_INJECT_URL remains an optional adapter override.",
+      "Deliver a prompt to a logged-in Muse lane target. Accepts invite_id (fetch invite.prompt) OR prompt+kind (invite|suspend|archive|resume). Refuses non-deliverable / non-logged-in targets. Preferred inject: POST target.serviceBase/generate with engine=muse + instance + Bearer IMGGEN_TOKEN (same Muse 联络 as 生图/视频; queues an image job that also muse.sent the prompt — fire-and-forget taskId). MUSE_INJECT_URL remains an optional adapter override. Does NOT paste into muse.ai via /browser/run.",
     inputSchema: {
       type: "object",
       properties: {
@@ -279,67 +279,75 @@ async function teamsListReceipts(api, { doorplate, company_code, type = "invite_
 }
 
 
-const MUSE_COMPOSER_SELECTOR = 'textarea[aria-label="Message"], textarea[placeholder="Message"]';
-
 function imggenServiceBase(target) {
   const base = String(target.serviceBase || target.host || "").replace(/\/$/, "");
   if (base && /^https?:\/\/imggen-[^/]+/i.test(base)) return base;
   return null;
 }
 
-/** Same channel as 生图 MCP sibling: POST {serviceBase}/browser/run with IMGGEN_TOKEN (not /generate). */
-async function injectViaBrowserRun(env, target, prompt) {
+/**
+ * Same Muse 联络 as 生图/视频: POST {serviceBase}/generate with engine=muse.
+ * /generate queues a real image job that also sends the prompt into the Muse session
+ * (stages muse.ready → muse.sent). We fire-and-forget (wait:false), record taskId,
+ * and do NOT poll to completion — invite deliver only needs the message into Muse.
+ * Do NOT use /browser/run goto muse.ai paste (HTTP 200 but never triggers redeem).
+ */
+async function injectViaMuseGenerate(env, target, prompt) {
   const serviceBase = imggenServiceBase(target);
   if (!serviceBase) return null;
   const instance = Number(target.instance ?? target.port ?? target.browserNo);
   if (!Number.isFinite(instance)) {
-    return { ok: false, error: "target missing browser instance/browserNo for /browser/run" };
+    return { ok: false, error: "target missing browser instance/browserNo for /generate" };
   }
   const token = env.IMGGEN_TOKEN;
   if (!token) {
-    return { ok: false, error: "IMGGEN_TOKEN required to POST imggen /browser/run" };
+    return { ok: false, error: "IMGGEN_TOKEN required to POST imggen /generate" };
   }
-  const actions = [
-    { op: "goto", url: "https://muse.ai/", timeout: 60000 },
-    { op: "waitFor", selector: MUSE_COMPOSER_SELECTOR, timeout: 30000 },
-    { op: "type", selector: MUSE_COMPOSER_SELECTOR, text: String(prompt) },
-    {
-      op: "eval",
-      expr: (() => {
-        const sel = JSON.stringify(MUSE_COMPOSER_SELECTOR);
-        return `(() => { const t = document.querySelector(${sel}); if (!t) return { ok: false, reason: 'no composer' }; t.focus(); t.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true })); return { ok: true }; })()`;
-      })(),
-    },
-  ];
+  const url = `${serviceBase}/generate`;
+  const body = {
+    prompt: String(prompt),
+    engine: "muse",
+    instance,
+    wait: false,
+  };
   try {
-    const ir = await fetch(`${serviceBase}/browser/run`, {
+    const ir = await fetch(url, {
       method: "POST",
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${token}`,
-        "user-agent": "muse-teams-invite/0.3.1",
+        "user-agent": "muse-teams-invite/0.3.2",
       },
-      body: JSON.stringify({ instance, actions }),
+      body: JSON.stringify(body),
     });
     const bodyText = await ir.text().catch(() => "");
     let bodyJson = null;
     try {
       bodyJson = JSON.parse(bodyText);
     } catch (_) { /* keep text */ }
+    const taskId =
+      (bodyJson && (bodyJson.taskId || bodyJson.task_id || bodyJson.id)) || null;
+    // Accept async accept (2xx + taskId) even if image job continues in background.
+    const accepted = ir.ok && (!!taskId || (bodyJson && bodyJson.ok !== false));
     return {
-      ok: ir.ok,
-      channel: "imggen_browser_run",
-      url: `${serviceBase}/browser/run`,
+      ok: accepted,
+      channel: "imggen_muse_generate",
+      url,
       instance,
+      engine: "muse",
+      taskId,
       http: ir.status,
       body: bodyJson || bodyText.slice(0, 2000),
+      note:
+        "POST /generate engine=muse (same channel as 生图). Image job is a side effect; deliver records taskId and does not poll.",
     };
   } catch (e) {
     return {
       ok: false,
-      channel: "imggen_browser_run",
-      url: `${serviceBase}/browser/run`,
+      channel: "imggen_muse_generate",
+      url,
       instance,
+      engine: "muse",
       error: e.message || String(e),
     };
   }
@@ -350,7 +358,7 @@ async function injectViaAdapterUrl(env, target, { prompt, kind, invite_id, compa
   try {
     const ir = await fetch(env.MUSE_INJECT_URL, {
       method: "POST",
-      headers: { "content-type": "application/json", "user-agent": "muse-teams-invite/0.3.1" },
+      headers: { "content-type": "application/json", "user-agent": "muse-teams-invite/0.3.2" },
       body: JSON.stringify({
         target_id,
         host: target.host,
@@ -554,10 +562,10 @@ async function callTool(env, name, args = {}) {
       if (!prompt) throw new Error("prompt required (or invite_id to fetch)");
       kind = kind || "invite";
       const delivery_id = `D-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      // Preferred: same Muse channel as 生图 — POST imggen-*/browser/run + IMGGEN_TOKEN.
+      // Preferred: same Muse 联络 as 生图/视频 — POST imggen-*/generate engine=muse + IMGGEN_TOKEN.
       // Optional override: MUSE_INJECT_URL adapter (legacy stub schema).
       let inject_detail =
-        (await injectViaBrowserRun(env, target, prompt)) ||
+        (await injectViaMuseGenerate(env, target, prompt)) ||
         (await injectViaAdapterUrl(env, target, {
           prompt,
           kind,
@@ -570,12 +578,12 @@ async function callTool(env, name, args = {}) {
       if (!inject_detail) {
         inject_status = "recorded_pending_inject";
         note =
-          "Target is logged-in-eligible but has no imggen serviceBase and MUSE_INJECT_URL is unset. Set FLEET_API_URL + IMGGEN_TOKEN for /browser/run.";
+          "Target is logged-in-eligible but has no imggen serviceBase and MUSE_INJECT_URL is unset. Set FLEET_API_URL + IMGGEN_TOKEN for /generate engine=muse.";
       } else if (inject_detail.ok) {
         inject_status = "injected";
         note =
-          inject_detail.channel === "imggen_browser_run"
-            ? "Injected via imggen /browser/run (same channel as 生图 MCP text path)."
+          inject_detail.channel === "imggen_muse_generate"
+            ? `Injected via imggen /generate engine=muse (same 联络 as 生图); taskId=${inject_detail.taskId || "?"}.`
             : "Inject endpoint (MUSE_INJECT_URL) called.";
       } else {
         inject_status = "inject_failed";
@@ -644,7 +652,7 @@ async function handleRpc(env, msg) {
       return ok(id, {
         protocolVersion: "2024-11-05",
         capabilities: { tools: {} },
-        serverInfo: { name: "muse-teams-invite", version: "0.3.1" },
+        serverInfo: { name: "muse-teams-invite", version: "0.3.2" },
       });
     }
     if (msg.method === "notifications/initialized") return ok(id, {});
@@ -677,11 +685,11 @@ export default {
       return json({
         ok: true,
         service: "muse-teams-invite",
-        version: "0.3.1",
+        version: "0.3.2",
         mcp: "POST /invite-mcp (or POST /) streamable-http JSON-RPC",
         tools: TOOLS.map((t) => t.name),
         teams_api: env.TEAMS_API_URL || TEAMS_API_DEFAULT,
-        note: "deliver posts to imggen-*/browser/run with IMGGEN_TOKEN (same channel as 生图); MUSE_INJECT_URL optional override",
+        note: "deliver posts to imggen-*/generate engine=muse with IMGGEN_TOKEN (same 联络 as 生图/视频); MUSE_INJECT_URL optional override",
       });
     }
 

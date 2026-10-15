@@ -23,7 +23,7 @@
 1. `invite_list_targets` — 可投递目标（已登 Muse）；`FLEET_API_URL` 发现或 `INVITE_TARGETS_JSON`
 2. `invite_compose` — 调 Teams 创建 invite + prompt
 3. `invite_lifecycle_compose` — 调 Teams suspend/resume/archive，返回 prompt（注销走 prompt 渠道）
-4. `invite_deliver` — 仅向 logged-in 目标投递；优先 `imggen-*/browser/run` + `IMGGEN_TOKEN`（与生图同渠）；可选 `MUSE_INJECT_URL` 覆盖
+4. `invite_deliver` — 仅向 logged-in 目标投递；优先 `imggen-*/generate` `engine=muse` + `IMGGEN_TOKEN`（与生图/视频同联络）；可选 `MUSE_INJECT_URL` 覆盖
 5. `invite_status` — 查投递记录
 6. `invite_ack_poll` — 轮询 Teams `invite_ack`
 
@@ -32,15 +32,16 @@
 - `TEAMS_API_URL` 生产建议 `https://muse-teams-v1.<account>.workers.dev`（invite→teams 同区自定义域易 522）；对外文档仍写 teams.vyibc.com
 - `TEAMS_MCP_URL` 默认 `https://teams.vyibc.com/mcp`
 - `FLEET_API_URL` **推荐** `https://fleet.vyibc.com/api/fleet`（解析 `identities.muse==="in"` / `museStatus==="logged_in"`）
-- `IMGGEN_TOKEN` **secret**：与 fleet-console / 节点 `CHATGPT_IMAGE_AUTH_TOKEN` 相同；`invite_deliver` 用它 `POST {serviceBase}/browser/run`
+- `IMGGEN_TOKEN` **secret**：与 fleet-console / 节点 `CHATGPT_IMAGE_AUTH_TOKEN` 相同；`invite_deliver` 用它 `POST {serviceBase}/generate`（`engine=muse`）
 - `INVITE_TARGETS_JSON` 可选：手动 targets
 - `MUSE_INJECT_URL` 可选：adapter 覆盖（无 imggen serviceBase 时）；**不要** 把裸 `/browser/run` URL 填这里（schema 不同）
 
-## 投递通道（与生图 MCP 同渠）
+## 投递通道（与生图/视频 MCP 同联络）
 
 1. `invite_list_targets` → `GET FLEET_API_URL` → `id=host-N@browserNo`，`host/serviceBase=https://imggen-*.vyibc.com`，`instance=browserNo`
-2. `invite_deliver` → `POST {serviceBase}/browser/run` + `Authorization: Bearer IMGGEN_TOKEN`，actions = goto muse.ai → type composer → eval Enter
-3. **不用** `/generate`（会前缀 Create an image 并等图）
+2. `invite_deliver` → `POST {serviceBase}/generate` + `Authorization: Bearer IMGGEN_TOKEN`，body = `{ prompt, engine: "muse", instance, wait: false }`
+3. 这是生图 MCP / Muse 视频路径用的同一条联络：任务阶段含 `muse.ready` → `muse.sent`（真实写入 Muse 会话）。`/generate` 会顺带排队一张图；投递只 fire-and-forget 记 `taskId`，不轮询出图。
+4. **不用** `/browser/run` goto muse.ai 灌字（HTTP 200 但不是旁聊 agent，不会 `teams_redeem_invite`）
 
 ## 投递日志持久化
 

@@ -16,7 +16,7 @@ binding = "DELIVERY_LOG"
 id = "d7fb896d2fe74f2c9a91046bb0581061"
 
 # Secrets (wrangler secret put):
-#   IMGGEN_TOKEN  — same as fleet-console / imggen:fleet-shared (Bearer for imggen-*/browser/run)
+#   IMGGEN_TOKEN  — same as fleet-console / imggen:fleet-shared (Bearer for imggen-*/generate engine=muse)
 # Optional:
 #   FLEET_API_TOKEN — if /api/fleet ever requires auth
 #   MUSE_INJECT_URL — optional adapter override (legacy stub schema)
