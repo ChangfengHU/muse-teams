@@ -968,7 +968,7 @@ async function edgeRequireLead(db, code, from) {
   }
   const doorplate = String(from).trim();
   const agents = await d1All(db,
-    "SELECT doorplate, role, created_at FROM agents WHERE company_code = ? ORDER BY created_at ASC",
+    "SELECT doorplate, role FROM agents WHERE company_code = ? ORDER BY doorplate ASC",
     String(code).trim().toUpperCase()
   );
   if (!agents.length) {
@@ -984,7 +984,7 @@ async function edgeRequireLead(db, code, from) {
 async function edgeNotifyLifecycleReceipts(db, code, type, from, body) {
   if (!db || !code || !type) return [];
   const agents = await d1All(db,
-    "SELECT doorplate, role FROM agents WHERE company_code = ? ORDER BY created_at ASC",
+    "SELECT doorplate, role FROM agents WHERE company_code = ? ORDER BY doorplate ASC",
     String(code).trim().toUpperCase()
   );
   const leads = agents.filter((a) => a.role === "lead");
