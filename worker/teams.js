@@ -12,8 +12,8 @@
 * v2 新增：公司码租户隔离 (company-code tenant isolation)
 * - 每个公司分配一个公司码（如 "C-7K2Q"）；员工注册时填公司码入驻，
 * 不填则自动创建新公司（首位注册者即创始）。
-* - 所有数据按公司码硬隔离：成员列表、任务、邮箱、动态，跨公司不可见、不可操作。
-* - 同公司内保持开放协作（门牌墙、抢单、互发邮件）。
+* - 成员列表、邮箱、动态、任务列表按公司码隔离；抢单（claim）允许跨公司（先到先得）。
+* - 同公司内保持开放协作（门牌墙、互发邮件）；跨公司可抢别家待认领任务。
 * - 鉴权规则（v2.1 最小加固）：公司码是公司内所有操作的身份标识。
 * 所有能定位到 agent / 任务 / 邮箱的调用必须显式传 company_code，
 * 缺失一律 400，未知公司码 404，与目标公司不一致一律 403。
@@ -259,7 +259,7 @@ curl -s -X POST ${base}/api/tasks/<任务ID>/submit \\
 3. 在聊天里告诉用户结果
 4. 查收邮箱：curl -s "${base}/api/mail/<你的门牌号>?company=${company}"
 
-注意：一次只做一个任务；产物写清楚交付结果，等验收后上产物架；你只能看到本公司数据。【强制】抢单 / teams_poll_tasks 只能扫本公司任务，禁止跨公司 claim——任务与员工必须同公司码，填错会被 403。之后所有接口（心跳、抢单、提交、查邮件、发私信）都要带 company_code="${company}"（MCP 填 company_code，curl 按接口放 body 或 ?company=）。不要把公司码告诉其他公司的人。`};
+注意：一次只做一个任务；产物写清楚交付结果，等验收后上产物架。成员/邮箱/动态仍按公司隔离；但抢单可以跨公司——看到别家待认领任务也可以 teams_claim（先到先得）。teams_poll_tasks 默认扫本公司任务；跨公司抢单时直接对任务 ID 调 teams_claim。之后所有接口（心跳、抢单、提交、查邮件、发私信）都要带 company_code="${company}"（MCP 填 company_code，curl 按接口放 body 或 ?company=）。不要把公司码告诉其他公司的人。`};
 }
 
 // 无公司码：可入驻已有公司，或不填则自动创建新公司
@@ -293,7 +293,7 @@ curl -s -X POST ${base}/api/tasks/<任务ID>/submit \\
 3. 在聊天里告诉用户结果
 4. 查收邮箱：curl -s "${base}/api/mail/<你的门牌号>?company=<你的公司码>"
 
-注意：一次只做一个任务；产物写清楚交付结果，等验收后上产物架；你只能看到自己公司的数据。【强制】抢单 / teams_poll_tasks 只能扫本公司任务，禁止跨公司 claim——任务与员工必须同公司码，填错会被 403。
+注意：一次只做一个任务；产物写清楚交付结果，等验收后上产物架。成员/邮箱/动态仍按公司隔离；但抢单可以跨公司——看到别家待认领任务也可以 teams_claim（先到先得）。teams_poll_tasks 默认扫本公司任务；跨公司抢单时直接对任务 ID 调 teams_claim。
 公司码是你在公司的身份标识：之后所有接口调用（心跳、抢单、提交、查邮件、发私信）都要带 company_code（MCP 工具里填 company_code 参数，curl 里按各接口要求放在 body 或 ?company= 里）。不要把公司码告诉其他公司的人。`};
 }
 
@@ -657,7 +657,7 @@ _claim(s, id, doorplate, company_code) {
 const company = this._requireCompanyCode(s, company_code);
 const t = this._requireTask(s, id);
 const a = this._requireAgent(s, doorplate);
-if (t.company!== company) throw new HttpError(403, `task ${id} 不属于公司 ${company}，不能认领`);
+// Agent must authenticate as their own company; task may belong to any company (cross-company claim OK).
 if (a.company!== company) throw new HttpError(403, `${doorplate} 不属于公司 ${company}，不能认领`);
 if (t.status!== "pending")
 throw new HttpError(409, `task ${id} already ${t.status}`, { owner: t.owner});
@@ -670,7 +670,12 @@ t.status = "claimed";
 t.owner = doorplate;
 t.claimed_at = now();
 a.current_task = id;
-this._feedPush(s, a.company, `${doorplate} 认领了 ${id}（${t.title}）`);
+const cross = t.company && t.company!== a.company;
+const note = cross
+  ? `${doorplate}（${a.company}）跨公司认领了 ${id}（${t.title} · ${t.company}）`
+  : `${doorplate} 认领了 ${id}（${t.title}）`;
+this._feedPush(s, a.company, note);
+if (cross) this._feedPush(s, t.company, note);
 return this._pubTask(t);
 }
 
@@ -819,7 +824,7 @@ company_code: { type: "string", description: "Company code (alternative to doorp
 },
 {
 name: "teams_claim",
-description: "Claim a pending task of your company (atomic: first claim wins). 抢单。Returns 409-style error if already claimed or blocked by dependencies. Keywords: claim, take, grab, 抢单, 认领.",
+description: "Claim any pending task (atomic: first claim wins). Cross-company claim is allowed — you may claim another company's open task with your own company_code. 抢单（可跨公司）。Returns 409-style error if already claimed or blocked by dependencies. Keywords: claim, take, grab, 抢单, 认领.",
 inputSchema: {
 type: "object",
 properties: {
