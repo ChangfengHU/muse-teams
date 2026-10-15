@@ -3479,7 +3479,7 @@ return new Response(null, { status: 204, headers: {...CORS_HEADERS}});
 const url = new URL(request.url);
 // 边缘探针：不进 DO，确认 Worker 新版本已生效
 if (url.pathname === "/api/version-probe")
-return json({ edge_version: "2026-10-15-assign-to-v1", ok: true, feature: "assign_to_direct_dispatch" });
+return json({ edge_version: "2026-10-15-assign-to-v1.1", ok: true, feature: "assign_to_direct_dispatch" });
 const id = env.TASK_QUEUE.idFromName("main");
 const stub = env.TASK_QUEUE.get(id);
 const base = `${url.protocol}//${url.host}`;
@@ -4115,23 +4115,27 @@ try {
   }
 
   // Edge gates: suspend/archive block claim / createTask / register(join)
+  // Also sticky-DO resilient assign_to (create+claim + D1 mark)
   if (url.pathname === "/api/tasks" && method === "POST") {
     let body = null;
     try { body = await request.json(); } catch (_) { body = {}; }
-    const code = (body && body.company_code) ? String(body.company_code).trim().toUpperCase() : "";
-    if (code) {
-      try { await edgeAssertCompanyActive(env.DB, code, "发单"); }
-      catch (e) {
-        if (e instanceof HttpError) return json({ ok: false, error: e.message, ...(e.extra || {}) }, e.status);
-        throw e;
+    try {
+      if (body && body.assign_to) {
+        const out = await edgeCreateTaskWithAssign(env, stub, base, body);
+        return json(out.data, out.status);
       }
+      const code = (body && body.company_code) ? String(body.company_code).trim().toUpperCase() : "";
+      if (code) await edgeAssertCompanyActive(env.DB, code, "发单");
+      const res = await stub.fetch(new Request(request.url, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}),
+      }));
+      let data = null;
+      try { data = await res.json(); } catch (_) {}
+      return json(data, res.status);
+    } catch (e) {
+      if (e instanceof HttpError) return json({ ok: false, error: e.message, ...(e.extra || {}) }, e.status);
+      throw e;
     }
-    const res = await stub.fetch(new Request(request.url, {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}),
-    }));
-    let data = null;
-    try { data = await res.json(); } catch (_) {}
-    return json(data, res.status);
   }
   if (url.pathname === "/api/agents/register" && method === "POST") {
     let body = null;
@@ -4307,30 +4311,6 @@ try {
       } catch (be) { console.error("edge broadcast receipt", be && be.message); }
     }
     return json(data, res.status);
-  }
-
-  // POST /api/tasks — edge assign_to (sticky-DO resilient)
-  if (url.pathname === "/api/tasks" && method === "POST") {
-    let body = null;
-    try { body = await request.json(); } catch (_) { body = {}; }
-    try {
-      if (body && body.assign_to) {
-        const out = await edgeCreateTaskWithAssign(env, stub, base, body);
-        return json(out.data, out.status);
-      }
-      // No assign_to: pass through; still enrich assigned=false consistently when DO new
-      const res = await stub.fetch(new Request(request.url, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body || {}),
-      }));
-      let data = null;
-      try { data = await res.json(); } catch (_) {}
-      return json(data, res.status);
-    } catch (e) {
-      if (e instanceof HttpError) return json({ ok: false, error: e.message, ...(e.extra || {}) }, e.status);
-      throw e;
-    }
   }
 
   // Enrich single task GET with delivery envelope + assigned flag from D1
