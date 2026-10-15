@@ -1,0 +1,17 @@
+# Muse Teams Invite Channel MCP
+# Deploy: CLOUDFLARE_API_TOKEN=… npx wrangler deploy
+name = "muse-teams-invite"
+main = "worker.js"
+compatibility_date = "2026-10-13"
+workers_dev = true
+
+[vars]
+FLEET_API_URL = "https://fleet.vyibc.com/api/fleet"
+TEAMS_API_URL = "https://muse-teams-v1.2513120790.workers.dev"
+TEAMS_MCP_URL = "https://teams.vyibc.com/mcp"
+
+# Secrets (wrangler secret put):
+#   IMGGEN_TOKEN  — same as fleet-console / imggen:fleet-shared (Bearer for imggen-*/browser/run)
+# Optional:
+#   FLEET_API_TOKEN — if /api/fleet ever requires auth
+#   MUSE_INJECT_URL — optional adapter override (legacy stub POST schema)
