@@ -30,7 +30,7 @@ function Timeline({ t }) {
   );
 }
 
-function TaskRow({ t, agents, onReview, onOpenArtifact, defaultOpen }) {
+function TaskRow({ t, agents, onReview, onOpenArtifact, onOpenTrace, defaultOpen }) {
   const [open, setOpen] = useState(!!defaultOpen);
   const owner = agents.find((a) => a.doorplate === t.owner);
   const when = t.claimed_at ? `${relTime(t.claimed_at)}认领` : `${relTime(t.created_at)}创建`;
@@ -66,18 +66,21 @@ function TaskRow({ t, agents, onReview, onOpenArtifact, defaultOpen }) {
             );
           })}
         </div>
-        {stKey(t) === 'review' && (
-          <div className="rev-btns">
-            <button className="btn-ok" onClick={(e) => { e.stopPropagation(); onReview(t.id, true); }}>✓ 通过上架</button>
-            <button className="btn-no" onClick={(e) => { e.stopPropagation(); onReview(t.id, false); }}>✗ 打回</button>
-          </div>
-        )}
+        <div className="rev-btns">
+          <button type="button" className="btn-trace" onClick={(e) => { e.stopPropagation(); onOpenTrace && onOpenTrace(t.id); }}>🔗 看链路</button>
+          {stKey(t) === 'review' && (
+            <>
+              <button className="btn-ok" onClick={(e) => { e.stopPropagation(); onReview(t.id, true); }}>✓ 通过上架</button>
+              <button className="btn-no" onClick={(e) => { e.stopPropagation(); onReview(t.id, false); }}>✗ 打回</button>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
 }
 
-function GroupBlock({ statusKey, list, agents, onReview, onOpenArtifact }) {
+function GroupBlock({ statusKey, list, agents, onReview, onOpenArtifact, onOpenTrace }) {
   const [page, setPage] = useState(1);
   const totalPages = Math.max(1, Math.ceil(list.length / PAGE_SIZE));
   useEffect(() => { if (page > totalPages) setPage(totalPages); }, [page, totalPages]);
@@ -93,17 +96,22 @@ function GroupBlock({ statusKey, list, agents, onReview, onOpenArtifact }) {
         <span className="cnt">{list.length}</span>
       </div>
       {slice.map((t) => (
-        <TaskRow key={t.id} t={t} agents={agents} onReview={onReview} onOpenArtifact={onOpenArtifact} />
+        <TaskRow key={t.id} t={t} agents={agents} onReview={onReview} onOpenArtifact={onOpenArtifact} onOpenTrace={onOpenTrace} />
       ))}
       <Pager page={page} totalPages={totalPages} onChange={setPage} label={`${statusKey} 分页`} />
     </div>
   );
 }
 
-export default function Tasks({ tasks, agents, onToast, onRefresh, onOpenArtifact, onCelebrate }) {
+export default function Tasks({ tasks, agents, company, onToast, onRefresh, onOpenArtifact, onCelebrate, onOpenTrace }) {
   const groups = ['pending', 'claimed', 'review', 'done', 'failed'];
-  const byStatus = (k) => tasks.filter((t) => stKey(t) === k)
-    .sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+  const coCode = company?.code || '';
+  const byStatus = (k) => tasks.filter((t) => {
+    if (stKey(t) !== k) return false;
+    // review/待验收：只显示本公司发单
+    if (k === 'review' && coCode && t.company !== coCode) return false;
+    return true;
+  }).sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
 
   const handleReview = async (id, approved) => {
     try {
@@ -143,6 +151,7 @@ export default function Tasks({ tasks, agents, onToast, onRefresh, onOpenArtifac
             agents={agents}
             onReview={handleReview}
             onOpenArtifact={onOpenArtifact}
+            onOpenTrace={onOpenTrace}
           />
         );
       })}

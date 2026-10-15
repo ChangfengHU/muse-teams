@@ -58,7 +58,11 @@ export default function LivingRoom({
   const pending = tasks.filter((t) => t.status === 'pending');
   const bp = boardSlots(pending.length);
   const doneTasks = tasks.filter((t) => t.status === 'done');
-  const reviewTasks = tasks.filter((t) => t.status === 'review' || t.status === 'done-pending-review');
+  // 待收托盘：仅本公司发单的待验收，绝不混入抢来的别家 review
+  const reviewTasks = tasks.filter((t) =>
+    (t.status === 'review' || t.status === 'done-pending-review') &&
+    (!coCode || t.company === coCode)
+  );
   const artCount = doneTasks.reduce((n, t) => n + Math.max((t.artifacts || []).length, 1), 0);
 
   const agentById = useCallback((id) => agents.find((a) => a.doorplate === id), [agents]);

@@ -129,7 +129,7 @@ createVideoGenTask: ({ title, prompts, priority, desc, acceptance }) =>
     ...(acceptance != null ? { acceptance } : {}),
     company_code: needCompany(),
   }),
-/** 抢单广场：跨公司任务市集 */
+/** 抢单广场：pending/claimed 跨公司；status=review 须传 company（发单方），否则后端返回空 */
 plaza: ({ status = 'pending', task_type = 'video_gen', company } = {}) => {
   const q = new URLSearchParams();
   if (status) q.set('status', status);
@@ -138,6 +138,8 @@ plaza: ({ status = 'pending', task_type = 'video_gen', company } = {}) => {
   return request(`/api/plaza?${q.toString()}`);
 },
 getTask: (taskId) => request(`/api/tasks/${encodeURIComponent(taskId)}`),
+  /** 一单生命周期链路：created → plaza → claimed → submitted → reviewed */
+  getTaskTrace: (taskId) => request(`/api/tasks/${encodeURIComponent(taskId)}/trace`),
 claimTask: (taskId, doorplate) =>
   request(`/api/tasks/${encodeURIComponent(taskId)}/claim`, 'POST', { doorplate, company_code: needCompany() }),
 submitTask: (taskId, doorplate, artifacts) =>

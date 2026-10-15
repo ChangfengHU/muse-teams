@@ -305,11 +305,13 @@ export default function ClaimPlaza({ company, agents, onToast, onRefresh, onGoto
         api.plaza({ status: 'pending', task_type: 'video_gen' }),
         api.plaza({ status: 'claimed', task_type: 'video_gen' }),
       ]);
-      // also pull review/done lightly for "已抢走" richness — claimed is enough; enrich with review from second call optional
+      // 待验收只拉本公司发单（/api/tasks），禁止全局 plaza?status=review 串公司
       let reviewTasks = [];
       try {
-        const rev = await api.plaza({ status: 'review', task_type: 'video_gen' });
-        reviewTasks = rev.tasks || [];
+        if (myCode) {
+          const rev = await api.tasks('review');
+          reviewTasks = (rev.tasks || []).filter((t) => t.company === myCode);
+        }
       } catch (_) { /* ignore */ }
       setPending(openRes.tasks || []);
       setClaimed([...(claimedRes.tasks || []), ...reviewTasks]);
@@ -319,7 +321,7 @@ export default function ClaimPlaza({ company, agents, onToast, onRefresh, onGoto
       if (!silent) onToast('广场加载失败: ' + e.message, true);
       setLoading(false);
     }
-  }, [onToast]);
+  }, [onToast, myCode]);
 
   useEffect(() => {
     load(false);

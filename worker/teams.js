@@ -109,6 +109,112 @@ CREATE INDEX IF NOT EXISTS idx_tasks_company ON tasks(company_code);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(company_code, status);
 `;
 
+
+/** Build one-order lifecycle trace from a published/enriched task (edge + DO). */
+function buildTaskTraceFromPub(t) {
+  if (!t || !t.id) return null;
+  const company_name = t.company_name || t.company || null;
+  const createdAt = t.created_at || null;
+  const claimedAt = t.claimed_at || null;
+  const submittedAt = t.submitted_at || null;
+  const reviewedAt = t.reviewed_at || t.done_at || null;
+  const approved = t.status === "done";
+  const ownerActor = t.owner
+    ? {
+        doorplate: t.owner,
+        name: t.owner_name || t.owner,
+        company: t.claim_company || null,
+      }
+    : null;
+  const stages = [
+    {
+      stage: "created",
+      label: "发单",
+      at: createdAt,
+      actor: t.company
+        ? { doorplate: null, name: company_name, company: t.company }
+        : null,
+      payload: { task_type: t.task_type || "general", priority: t.priority || "P1" },
+    },
+    {
+      stage: "plaza",
+      label: "进广场",
+      at: createdAt,
+      actor: null,
+      payload: { open_to: "cross_company" },
+    },
+    {
+      stage: "claimed",
+      label: "抢单",
+      at: claimedAt,
+      actor: ownerActor,
+      payload: claimedAt
+        ? {
+            claim_company: t.claim_company || null,
+            cross_company: !!(t.claim_company && t.company && t.claim_company !== t.company),
+          }
+        : {},
+    },
+    {
+      stage: "submitted",
+      label: "交单",
+      at: submittedAt,
+      actor: ownerActor,
+      payload: submittedAt
+        ? {
+            artifact_count: Array.isArray(t.artifacts) ? t.artifacts.length : 0,
+            has_result: t.result != null,
+          }
+        : {},
+    },
+    {
+      stage: "reviewed",
+      label: "验收",
+      at: reviewedAt,
+      actor: null,
+      payload: reviewedAt
+        ? {
+            approved,
+            final_status: approved ? "done" : (t.status || "pending"),
+            company: t.company || null,
+          }
+        : {},
+    },
+  ];
+  const ms = (a, b) => (a != null && b != null && b >= a) ? (b - a) : null;
+  const endAt = t.done_at || t.reviewed_at || null;
+  return {
+    task_id: t.id,
+    task_type: t.task_type || "general",
+    title: t.title,
+    status: t.status,
+    company: t.company || null,
+    company_name,
+    claim_company: t.claim_company || null,
+    prompts: Array.isArray(t.prompts) ? t.prompts : [],
+    result: t.result != null ? t.result : null,
+    stages,
+    durations_ms: {
+      pending_to_claim: ms(createdAt, claimedAt),
+      claim_to_submit: ms(claimedAt, submittedAt),
+      submit_to_done: ms(submittedAt, endAt),
+      total: ms(createdAt, endAt),
+    },
+  };
+}
+
+const TASK_TRACE_TOOL = {
+  name: "teams_task_trace",
+  description: "One-order lifecycle chain: created → plaza → claimed → submitted → reviewed. 一单链路追溯。Returns stages with timestamps/actors and durations_ms. Keywords: trace, timeline, chain, lifecycle, 链路, 追溯, 时间线.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      task_id: { type: "string", description: "Task id, e.g. 'T-1018'" },
+    },
+    required: ["task_id"],
+  },
+};
+
 async function ensureD1Schema(db) {
   if (!db) return;
   // D1 exec accepts multi-statement in batch via prepare/run per statement
@@ -731,6 +837,8 @@ return this._pubTask(t);
 }
 
 _listTasks(s, status, company_code) {
+// 待验收 / teams_poll_tasks：只返回发单公司 (t.company) 的任务。
+// 绝不按 claim_company 并入——抢单方不能验收别家单，读路径也不应看到。
 const company = this._requireCompany(s, company_code).code;
 let list = Object.values(s.tasks).filter((t) => t.company === company).sort((a, b) => b.created_at - a.created_at);
 if (status && status!== "all") list = list.filter((t) => t.status === status);
@@ -756,7 +864,13 @@ if (st && st !== "all") list = list.filter((t) => t.status === st);
 if (task_type && task_type !== "all") {
 list = list.filter((t) => (t.task_type || "general") === task_type);
 }
-if (company) {
+// pending/claimed：跨公司抢单市集，可无 company。
+// review（待验收）：必须带发单公司码，只返回 t.company === company；缺省返回空，防串公司泄漏。
+if (st === "review") {
+if (!company) return [];
+const c = this._normCompanyCode(company);
+list = list.filter((t) => t.company === c);
+} else if (company) {
 const c = this._normCompanyCode(company);
 list = list.filter((t) => t.company === c);
 }
@@ -783,6 +897,18 @@ return items.slice(0, n);
 _getTask(s, id) {
 const t = this._requireTask(s, id);
 return this._enrichTask(s, t);
+}
+
+_actorFromAgent(s, doorplate) {
+if (!doorplate) return null;
+const a = s.agents[doorplate];
+if (!a) return { doorplate, name: doorplate, company: null };
+return { doorplate, name: a.name || doorplate, company: a.company || null };
+}
+
+_taskTrace(s, id) {
+const t = this._requireTask(s, id);
+return buildTaskTraceFromPub(this._enrichTask(s, t));
 }
 
 _claim(s, id, doorplate, company_code) {
@@ -979,7 +1105,7 @@ required: ["company_code", "doorplates"]
 },
 {
 name: "teams_poll_tasks",
-description: "List tasks of YOUR company, optionally filtered by status. 拉取本公司任务列表。Poll regularly (e.g. every 60s) to discover new work. Default status is 'pending'. Keywords: tasks, poll, list, 任务列表, 拉任务.",
+description: "List tasks YOUR company published (t.company === your company_code), optionally filtered by status. 拉取本公司发单的任务。status=review 只含本公司待验收，不含抢来的别家单。Default 'pending'. Keywords: tasks, poll, list, 任务列表, 拉任务, 待验收.",
 inputSchema: {
 type: "object",
 properties: {
@@ -1122,6 +1248,17 @@ doorplate: { type: "string", description: "Your doorplate (used to scope to your
 company_code: { type: "string", description: "Company code (alternative to doorplate for scoping)"}
 }
 }
+},
+{
+name: "teams_task_trace",
+description: "One-order lifecycle chain: created → plaza → claimed → submitted → reviewed. 一单链路追溯。Returns stages with timestamps/actors and durations_ms. Keywords: trace, timeline, chain, lifecycle, 链路, 追溯, 时间线.",
+inputSchema: {
+type: "object",
+properties: {
+task_id: { type: "string", description: "Task id, e.g. 'T-1018'"}
+},
+required: ["task_id"]
+}
 }
 ];
 }
@@ -1132,6 +1269,7 @@ switch (name) {
 case "teams_register": return this._register(s, a);
 case "teams_heartbeat": return this._heartbeat(s, a.doorplate, a.current_task, a.company_code);
 case "teams_company_renew": return this._companyRenew(s, a.company_code, a.doorplates, a.from);
+// 待验收只走 _listTasks（发单公司），不要用 plaza status=review
 case "teams_poll_tasks": return { tasks: this._listTasks(s, a.status || "pending", this._resolveCompany(s, a))};
 case "teams_claim": return this._claim(s, a.task_id, a.doorplate, a.company_code);
 case "teams_submit": return this._submit(s, a.task_id, a.doorplate, a.artifacts, a.company_code, a.result);
@@ -1143,6 +1281,7 @@ case "teams_read_inbox": return this._inbox(s, a.doorplate, a.company_code);
 case "teams_list_agents": return { agents: this._listAgents(s, this._resolveCompany(s, a))};
 case "teams_update_profile": return this._updateProfile(s, a.doorplate, a, a.company_code);
 case "teams_feed": return { feed: this._feedOf(s, this._resolveCompany(s, a))};
+case "teams_task_trace": return this._taskTrace(s, a.task_id);
 default: throw new HttpError(404, `unknown tool: ${name}`);
 }
 }
@@ -1221,7 +1360,7 @@ const companyOf = (b) => (b && b.company_code) || query.get("company");
 
 // GET /api/health
 if (method === "GET" && r.length === 1 && r[0] === "health")
-return json({ ok: true});
+return json({ ok: true, do_version: "2026-10-15-trace-v1", has_task_trace: typeof this._taskTrace === "function"});
 
 // GET /api/invite?role=&company=
 if (method === "GET" && r.length === 1 && r[0] === "invite") {
@@ -1293,16 +1432,26 @@ return json(this._deleteAgent(s, r[1], companyOf(body) || query.get("company"), 
 if (method === "POST" && r.length === 1 && r[0] === "tasks")
 return json(this._createTask(s, body || {}));
 
-// GET /api/plaza?status=&task_type=&company= — cross-company open market
-if (method === "GET" && r.length === 1 && r[0] === "plaza")
-return json({
-tasks: this._listPlaza(s, {
-status: query.get("status") || "pending",
+// GET /api/plaza?status=&task_type=&company= — 抢单市集；status=review 须带 company（发单方）
+if (method === "GET" && r.length === 1 && r[0] === "plaza") {
+const plazaStatus = query.get("status") || "pending";
+const plazaCompany = query.get("company") || null;
+const tasks = this._listPlaza(s, {
+status: plazaStatus,
 task_type: query.get("task_type"),
-company: query.get("company") || null,
-}),
-feed: this._plazaFeed(s, query.get("feed_limit") || 30),
+company: plazaCompany,
 });
+const body = {
+tasks,
+feed: this._plazaFeed(s, query.get("feed_limit") || 30),
+};
+// 探针：review 无 company 时 tasks 必为空；带 fix 标记确认新代码已加载
+if (plazaStatus === "review") {
+body.review_scope = "publisher_company_only";
+body.review_fix = "2026-10-15-v1";
+}
+return json(body);
+}
 
 // GET /api/plaza/feed
 if (method === "GET" && r.length === 2 && r[0] === "plaza" && r[1] === "feed")
@@ -1311,6 +1460,10 @@ return json({ feed: this._plazaFeed(s, query.get("limit") || 40) });
 // GET /api/tasks?status=&company=
 if (method === "GET" && r.length === 1 && r[0] === "tasks")
 return json({ tasks: this._listTasks(s, query.get("status"), query.get("company"))});
+
+// GET /api/tasks/:id/trace — one-order lifecycle chain
+if (method === "GET" && r.length === 3 && r[0] === "tasks" && r[2] === "trace")
+return json(this._taskTrace(s, r[1]));
 
 // GET /api/tasks/:id — single task detail (cross-company readable for plaza)
 if (method === "GET" && r.length === 2 && r[0] === "tasks")
@@ -1354,6 +1507,9 @@ async fetch(request, env) {
 if (request.method.toUpperCase() === "OPTIONS")
 return new Response(null, { status: 204, headers: {...CORS_HEADERS}});
 const url = new URL(request.url);
+// 边缘探针：不进 DO，确认 Worker 新版本已生效
+if (url.pathname === "/api/version-probe")
+return json({ edge_version: "2026-10-15-trace-v2", ok: true, feature: "task_trace_edge" });
 const id = env.TASK_QUEUE.idFromName("main");
 const stub = env.TASK_QUEUE.get(id);
 const base = `${url.protocol}//${url.host}`;
@@ -1406,6 +1562,71 @@ try { data = await res.json();} catch (_) { /* ignore */}
 if (!res.ok) return json(data || { ok: false, error: "create failed"}, res.status);
 const invite = buildInvitePrompt(base, null, data.code, data.name);
 return json({...data, invite_prompt: invite.prompt});
+}
+
+
+// GET /api/tasks/:id/trace — edge fallback (DO may stick to old Worker version under steady heartbeat)
+{
+const m = url.pathname.match(/^\/api\/tasks\/([^/]+)\/trace$/);
+if (method === "GET" && m) {
+const taskId = decodeURIComponent(m[1]);
+const tres = await stub.fetch(new Request(`${base}/api/tasks/${encodeURIComponent(taskId)}`, { method: "GET" }));
+let task = null;
+try { task = await tres.json(); } catch (_) { /* ignore */ }
+if (!tres.ok) return json(task || { ok: false, error: "not found" }, tres.status);
+const trace = buildTaskTraceFromPub(task);
+if (!trace) return json({ ok: false, error: "cannot build trace" }, 500);
+return json(trace);
+}
+}
+
+// MCP edge shim: inject teams_task_trace while DO code is sticky on old version
+if (url.pathname === "/mcp" && method === "POST") {
+let body = null;
+try { body = await request.json(); } catch (_) {
+return json({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } });
+}
+const rpcId = body && body.id !== undefined ? body.id : null;
+if (body && body.method === "tools/list") {
+const res = await stub.fetch(new Request(`${base}/mcp`, {
+method: "POST",
+headers: { "content-type": "application/json" },
+body: JSON.stringify(body),
+}));
+let data = null;
+try { data = await res.json(); } catch (_) { return res; }
+const tools = (data && data.result && data.result.tools) || [];
+if (!tools.some((t) => t && t.name === "teams_task_trace")) {
+tools.push(TASK_TRACE_TOOL);
+}
+if (data && data.result) data.result.tools = tools;
+return json(data);
+}
+if (body && body.method === "tools/call" && body.params && body.params.name === "teams_task_trace") {
+const args = body.params.arguments || {};
+const taskId = args.task_id;
+if (!taskId) {
+return json({ jsonrpc: "2.0", id: rpcId, error: { code: -32602, message: "task_id is required" } });
+}
+const tres = await stub.fetch(new Request(`${base}/api/tasks/${encodeURIComponent(taskId)}`, { method: "GET" }));
+let task = null;
+try { task = await tres.json(); } catch (_) { /* ignore */ }
+if (!tres.ok) {
+return json({ jsonrpc: "2.0", id: rpcId, error: { code: -32602, message: (task && task.error) || `unknown task: ${taskId}` } });
+}
+const trace = buildTaskTraceFromPub(task);
+return json({
+jsonrpc: "2.0",
+id: rpcId,
+result: { content: [{ type: "text", text: JSON.stringify(trace) }] },
+});
+}
+// Other MCP methods: rebuild request with already-read body
+return stub.fetch(new Request(request.url, {
+method: "POST",
+headers: { "content-type": "application/json" },
+body: JSON.stringify(body),
+}));
 }
 
 return stub.fetch(request);

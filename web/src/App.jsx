@@ -11,6 +11,7 @@ import Artifacts from './tabs/Artifacts.jsx';
 import Activity from './tabs/Activity.jsx';
 import Companies from './tabs/Companies.jsx';
 import ClaimPlaza from './tabs/ClaimPlaza.jsx';
+import Trace from './tabs/Trace.jsx';
 import { agentStatus } from './components/Creature.jsx';
 import { artIcon } from './components/Modals.jsx';
 import { deliverCelebration } from './anim.js';
@@ -25,6 +26,7 @@ const TAB_TO_HASH = {
   agents: 'team',
   arts: 'arts',
   feed: 'feed',
+  trace: 'trace',
 };
 const HASH_TO_TAB = Object.fromEntries(
   Object.entries(TAB_TO_HASH).map(([tab, hash]) => [hash, tab])
@@ -39,8 +41,13 @@ function tabFromHash() {
 
 function setHashForTab(tab) {
   const hash = TAB_TO_HASH[tab] || 'home';
-  const next = '#' + hash;
   if (typeof location === 'undefined') return;
+  // Preserve #trace/T-xxxx deep link when staying on trace
+  if (tab === 'trace') {
+    const cur = (location.hash || '').replace(/^#/, '');
+    if (cur === 'trace' || cur.startsWith('trace/') || cur.startsWith('trace?')) return;
+  }
+  const next = '#' + hash;
   if (location.hash === next) return;
   try {
     history.replaceState(null, '', next);
@@ -60,6 +67,7 @@ export default function App() {
   const [showInvite, setShowInvite] = useState(false);
   const [artView, setArtView] = useState(null); // {task, idx}
   const [toastMsg, setToastMsg] = useState(null);
+  const [traceTaskId, setTraceTaskId] = useState(null);
   const toastTimer = useRef(null);
 
   const toast = useCallback((msg, isErr) => {
@@ -71,6 +79,17 @@ export default function App() {
   const switchTab = useCallback((next) => {
     setTab(next);
     setHashForTab(next);
+  }, []);
+
+  const openTrace = useCallback((taskId) => {
+    const id = taskId ? String(taskId).trim().toUpperCase() : '';
+    setTraceTaskId(id || null);
+    setTab('trace');
+    try {
+      history.replaceState(null, '', id ? `#trace/${encodeURIComponent(id)}` : '#trace');
+    } catch (_) {
+      location.hash = id ? `trace/${id}` : 'trace';
+    }
   }, []);
 
   // hash ↔ tab
@@ -135,7 +154,11 @@ export default function App() {
   const online = agents.filter((a) => agentStatus(a) === 'online').length;
   const busy = agents.filter((a) => agentStatus(a) === 'busy').length;
   const pendingN = tasks.filter((t) => t.status === 'pending').length;
-  const reviewN = tasks.filter((t) => t.status === 'review' || t.status === 'done-pending-review').length;
+  const coCode = company?.code || '';
+  const reviewN = tasks.filter((t) =>
+    (t.status === 'review' || t.status === 'done-pending-review') &&
+    (!coCode || t.company === coCode)
+  ).length;
 
   const openArtifact = (taskId, idx) => {
     const t = tasks.find((x) => x.id === taskId);
@@ -232,9 +255,9 @@ export default function App() {
             />
           )}
 
-          {tab !== 'companies' && tab !== 'agents' && !company && needCompanyHint}
+          {tab !== 'companies' && tab !== 'agents' && tab !== 'trace' && !company && needCompanyHint}
 
-          {tab !== 'companies' && tab !== 'agents' && company && !connected && (
+          {tab !== 'companies' && tab !== 'agents' && tab !== 'trace' && company && !connected && (
             <div className="empty-hint">连接中…</div>
           )}
 
@@ -271,14 +294,17 @@ export default function App() {
             />
           )}
           {connected && tab === 'tasks' && (
-            <Tasks tasks={tasks} agents={agents} onToast={toast}
+            <Tasks tasks={tasks} agents={agents} company={company} onToast={toast}
               onRefresh={() => refresh(true)} onOpenArtifact={openArtifact}
-              onCelebrate={handleCelebrate} />
+              onCelebrate={handleCelebrate} onOpenTrace={openTrace} />
           )}
           {connected && tab === 'arts' && (
             <Artifacts tasks={tasks} agents={agents} onOpenArtifact={openArtifact} />
           )}
           {connected && tab === 'feed' && <Activity feed={feed} />}
+          {tab === 'trace' && (
+            <Trace company={company} onToast={toast} initialTaskId={traceTaskId} />
+          )}
         </main>
       </div>
 
