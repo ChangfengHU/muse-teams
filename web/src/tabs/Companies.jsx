@@ -1,9 +1,35 @@
-// 公司管理 —— 服务端 D1 列表 + 一键创建 + 公司码加入 + 复制邀请词
+// 公司管理 —— 卡片网格 + 创建 / 输入公司码 / 邀请词
 import React, { useEffect, useState, useCallback } from 'react';
 import {
   api, getCompany, setCompany,
   listSavedCompanies, saveCompanyLocal, updateSavedCompany,
 } from '../api.js';
+
+function CompanyCard({ item, active, liveMembers, onSelect }) {
+  const count = active && liveMembers != null
+    ? liveMembers
+    : (item.member_count ?? 0);
+  return (
+    <button
+      type="button"
+      className={`co-card${active ? ' active' : ''}`}
+      onClick={() => onSelect(item)}
+    >
+      <div className="co-card-top">
+        <div className="co-card-mark" aria-hidden>🏢</div>
+        <div className="co-card-title">
+          <div className="co-card-name">{item.name || item.code}</div>
+          <span className="co-code-badge">{item.code}</span>
+        </div>
+        {active && <span className="co-card-pill">当前</span>}
+      </div>
+      <div className="co-card-foot">
+        <span className="co-card-stat">👥 <b>{count}</b> 成员</span>
+        <span className="co-card-action">{active ? '已选中' : '进入 →'}</span>
+      </div>
+    </button>
+  );
+}
 
 export default function Companies({ company, agents, onSelectCompany, onToast }) {
   const [list, setList] = useState([]);
@@ -28,7 +54,6 @@ export default function Companies({ company, agents, onSelectCompany, onToast })
       const res = await api.listCompanies();
       const companies = (res && res.companies) || [];
       setList(companies);
-      // merge invite_prompt from local cache if any
       const cached = listSavedCompanies();
       for (const c of companies) {
         const hit = cached.find((x) => x.code === c.code);
@@ -43,7 +68,6 @@ export default function Companies({ company, agents, onSelectCompany, onToast })
       const msg = e && e.message ? e.message : String(e);
       setListError(msg);
       if (!silent) toast('加载公司列表失败: ' + msg, true);
-      // fallback: show local cache so UI is not blank offline
       setList(listSavedCompanies());
       return [];
     } finally {
@@ -55,7 +79,6 @@ export default function Companies({ company, agents, onSelectCompany, onToast })
     loadCompanies(false);
   }, [loadCompanies]);
 
-  // 选中公司时：优先用本地缓存的邀请词，否则拉 /api/invite
   useEffect(() => {
     if (!currentCode) {
       setInvitePrompt('');
@@ -124,7 +147,7 @@ export default function Companies({ company, agents, onSelectCompany, onToast })
       return;
     }
     if (!/^C-[A-Z0-9]+$/.test(code)) {
-      setJoinError('公司码格式不对，应为 C- 开头，如 C-78CR');
+      setJoinError('公司码格式不对，应为 C- 开头');
       return;
     }
     setJoinBusy(true);
@@ -149,7 +172,7 @@ export default function Companies({ company, agents, onSelectCompany, onToast })
     } catch (e) {
       const msg = e && e.message ? e.message : String(e);
       setJoinError(msg.includes('HTTP 404') || /not found|不存在/i.test(msg)
-        ? `找不到公司 ${code}，请核对公司码`
+        ? `找不到公司 ${code}`
         : '加入失败: ' + msg);
       toast('加入失败: ' + msg, true);
     } finally {
@@ -177,37 +200,29 @@ export default function Companies({ company, agents, onSelectCompany, onToast })
   };
 
   const memberCount = agents ? agents.length : 0;
+  const selected = list.find((c) => c.code === currentCode)
+    || (currentCode ? { code: currentCode, name: (company && company.name) || currentCode } : null);
 
   return (
     <div className="mt-tabpane">
       <h2 className="sec-title">
-        <span className="serif">🏢 公司管理</span>
-        <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 400 }}>
-          服务端列表 · 一键建公司 · 输入公司码 · 复制邀请词贴进 Muse
-        </span>
+        <span className="serif">🏢 公司</span>
+        <span className="sec-sub">创建或选中，复制邀请词贴进 Muse</span>
       </h2>
 
-      <div style={{ marginBottom: 18 }}>
-        <button className="btn" onClick={createOne} disabled={busy}>
-          {busy ? '创建中…' : '✨ 一键创建公司'}
+      <div className="co-toolbar">
+        <button type="button" className="btn" onClick={createOne} disabled={busy}>
+          {busy ? '创建中…' : '✨ 创建公司'}
         </button>
         <button
           type="button"
           className="btn btn-sm btn-ghost"
-          style={{ marginLeft: 8 }}
           onClick={() => loadCompanies(false)}
           disabled={listLoading}
         >
-          {listLoading ? '刷新中…' : '刷新列表'}
+          {listLoading ? '刷新中…' : '刷新'}
         </button>
-        <div className="msub" style={{ marginTop: 8 }}>
-          公司列表来自 Cloudflare D1（teams.vyibc.com），换浏览器也不会丢。创建后把邀请词贴进 Muse，注册后门牌号回显到「成员」。
-        </div>
-      </div>
-
-      <div className="field" style={{ marginBottom: 22, maxWidth: 480 }}>
-        <label>输入公司码选中（快速定位）</label>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+        <div className="co-join">
           <input
             type="text"
             value={joinCode}
@@ -221,10 +236,10 @@ export default function Companies({ company, agents, onSelectCompany, onToast })
                 joinByCode();
               }
             }}
-            placeholder="例如 C-78CR"
+            placeholder="输入公司码加入"
             disabled={joinBusy}
             autoCapitalize="characters"
-            style={{ flex: '1 1 160px', minWidth: 140, textTransform: 'uppercase' }}
+            className="co-join-input"
           />
           <button
             type="button"
@@ -232,117 +247,85 @@ export default function Companies({ company, agents, onSelectCompany, onToast })
             onClick={joinByCode}
             disabled={joinBusy}
           >
-            {joinBusy ? '查询中…' : '选中公司'}
+            {joinBusy ? '…' : '加入'}
           </button>
         </div>
-        {joinError ? (
-          <div style={{ color: 'var(--danger, #c0392b)', fontSize: 13, marginTop: 8 }}>
-            {joinError}
-          </div>
-        ) : (
-          <div className="msub" style={{ marginTop: 8 }}>
-            向服务端核对公司码后选中。公司码不区分大小写。
-          </div>
-        )}
       </div>
+      {joinError && <div className="co-join-err">{joinError}</div>}
 
-      <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'flex-start' }}>
-        <div style={{ flex: '1 1 260px', minWidth: 240 }}>
-          <h3 className="serif" style={{ fontSize: 16, marginBottom: 10 }}>全部公司</h3>
-          {listLoading && !list.length && (
-            <div className="empty-hint" style={{ padding: '20px 12px' }}>加载公司列表…</div>
-          )}
-          {!listLoading && listError && !list.length && (
-            <div className="empty-hint" style={{ padding: '20px 12px', color: 'var(--danger, #c0392b)' }}>
-              加载失败：{listError}
+      {listLoading && !list.length && (
+        <div className="empty-hint">加载公司…</div>
+      )}
+      {!listLoading && listError && !list.length && (
+        <div className="empty-hint" style={{ color: 'var(--danger, #c0392b)' }}>
+          加载失败：{listError}
+        </div>
+      )}
+      {!listLoading && !listError && !list.length && (
+        <div className="empty-hint">还没有公司。点「创建公司」，或输入已有公司码。</div>
+      )}
+
+      {!!list.length && (
+        <div className="co-grid">
+          {list.map((item) => (
+            <CompanyCard
+              key={item.code}
+              item={item}
+              active={item.code === currentCode}
+              liveMembers={memberCount}
+              onSelect={select}
+            />
+          ))}
+        </div>
+      )}
+
+      {selected && (
+        <section className="co-invite">
+          <header className="co-invite-head">
+            <div>
+              <div className="co-invite-title">{selected.name || selected.code}</div>
+              <div className="co-invite-sub">
+                <span className="co-code-badge">{selected.code}</span>
+                <span>👥 {memberCount} 成员</span>
+              </div>
             </div>
-          )}
-          {!listLoading && !listError && !list.length && (
-            <div className="empty-hint" style={{ padding: '20px 12px' }}>
-              还没有公司。点「一键创建」，或上方输入已有公司码
+            <div className="co-invite-actions">
+              <button
+                type="button"
+                className="btn btn-sm btn-ghost"
+                onClick={() => copy(currentCode, '公司码已复制 📋')}
+              >
+                复制码
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => copy(invitePrompt, '邀请词已复制，去 Muse 粘贴 🚪')}
+                disabled={!invitePrompt || inviteLoading}
+              >
+                复制邀请词
+              </button>
             </div>
-          )}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {list.map((item) => {
-              const active = item.code === currentCode;
-              return (
-                <button
-                  key={item.code}
-                  type="button"
-                  onClick={() => select(item)}
-                  className="mcard"
-                  style={{
-                    textAlign: 'left',
-                    cursor: 'pointer',
-                    borderColor: active ? 'var(--accent)' : undefined,
-                    boxShadow: active ? '0 0 0 2px rgba(217,119,87,.25)' : undefined,
-                    fontFamily: 'inherit',
-                    color: 'inherit',
-                    width: '100%',
-                  }}
-                >
-                  <div className="mcard-name">{item.name || item.code}</div>
-                  <div className="mcard-door">{item.code}</div>
-                  <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 6 }}>
-                    成员 {active ? memberCount : (item.member_count ?? '—')} 只
-                    {active ? ' · 当前选中' : ''}
-                  </div>
-                </button>
-              );
-            })}
+          </header>
+          <div className="field co-invite-field">
+            <label>邀请词 · 贴进 Muse 注册（含 company_code={currentCode}）</label>
+            {inviteLoading && !invitePrompt ? (
+              <div className="empty-hint" style={{ padding: 16 }}>加载邀请词…</div>
+            ) : (
+              <textarea
+                rows={10}
+                readOnly
+                value={invitePrompt}
+                className="co-invite-ta"
+              />
+            )}
           </div>
-        </div>
+        </section>
+      )}
 
-        <div style={{ flex: '2 1 360px', minWidth: 280 }}>
-          {!currentCode ? (
-            <div className="empty-hint">先创建、输入公司码，或点选一家公司</div>
-          ) : (
-            <>
-              <h3 className="serif" style={{ fontSize: 16, marginBottom: 10 }}>当前公司</h3>
-              <div className="mcard" style={{ marginBottom: 14 }}>
-                <div className="mcard-name">{(company && company.name) || currentCode}</div>
-                <div className="mcard-door" style={{ marginTop: 4 }}>
-                  公司码 <code style={{ color: 'var(--accent-dark)', fontWeight: 700 }}>{currentCode}</code>
-                </div>
-                <div className="mcard-stats" style={{ marginTop: 10 }}>
-                  <span>👥 成员 <b>{memberCount}</b></span>
-                </div>
-                <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
-                  <button
-                    type="button"
-                    className="btn btn-sm btn-ghost"
-                    onClick={() => copy(currentCode, '公司码已复制 📋')}
-                  >
-                    复制公司码
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-sm"
-                    onClick={() => copy(invitePrompt, '邀请词已复制，去 Muse 粘贴 🚪')}
-                    disabled={!invitePrompt || inviteLoading}
-                  >
-                    复制邀请词
-                  </button>
-                </div>
-              </div>
-
-              <div className="field">
-                <label>注册邀请提示词（公司维度 · 必须带 company_code={currentCode}）</label>
-                {inviteLoading && !invitePrompt ? (
-                  <div className="empty-hint" style={{ padding: 16 }}>加载邀请词…</div>
-                ) : (
-                  <textarea
-                    rows={14}
-                    readOnly
-                    value={invitePrompt}
-                    style={{ fontSize: 12.5, lineHeight: 1.65, fontFamily: 'ui-monospace, monospace' }}
-                  />
-                )}
-              </div>
-            </>
-          )}
-        </div>
-      </div>
+      {!selected && !!list.length && (
+        <div className="empty-hint" style={{ paddingTop: 8 }}>点选上方卡片进入公司，可复制邀请词</div>
+      )}
     </div>
   );
 }
