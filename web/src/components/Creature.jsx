@@ -1,6 +1,6 @@
 // 毛怪元素 —— 状态类驱动 CSS 动画
 // idle → breathe/lookaround, working → workbob/pawtap, offline → curl/zzz
-import React, { useState, useRef, forwardRef } from 'react';
+import React, { useState, useRef, useEffect, forwardRef } from 'react';
 import MonsterAvatar from './MonsterAvatar.jsx';
 import { relTime, heartbeatLabel } from '../api.js';
 
@@ -18,14 +18,39 @@ const Creature = forwardRef(function Creature(
   ref
 ) {
   const [bubbleOpen, setBubbleOpen] = useState(false);
-  const bubbleRef = useRef(null);
+  const rootRef = useRef(null);
   const st = agentStatus(agent);
   const cls = st === 'offline' ? 'offline' : st === 'busy' ? 'working' : 'idle';
   const stTxt = st === 'busy' ? '🏃 干活中' : st === 'offline' ? '💤 离线' : '🛋️ 等活儿';
 
+  const setRefs = (el) => {
+    rootRef.current = el;
+    if (typeof ref === 'function') ref(el);
+    else if (ref) ref.current = el;
+  };
+
+  useEffect(() => {
+    if (!bubbleOpen) return undefined;
+    const onPointerDown = (e) => {
+      const root = rootRef.current;
+      if (!root) return;
+      if (root.contains(e.target)) return;
+      setBubbleOpen(false);
+    };
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') setBubbleOpen(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown, true);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown, true);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [bubbleOpen]);
+
   return (
     <div
-      ref={ref}
+      ref={setRefs}
       className={`mt-creature ${cls}`}
       data-doorplate={agent.doorplate}
       style={{ left: leftPct + '%', top: topPct + '%' }}
