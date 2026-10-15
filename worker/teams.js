@@ -35,6 +35,7 @@ const DEFAULT_COMPANY_NAME = "我的公司";
 const RECEIPT_TYPES = [
   "invite_sent", "invite_ack", "claim_ok", "submit_ok",
   "review_pass", "review_reject", "broadcast", "agent_offline", "quota_warn",
+  "company_suspend", "company_resume", "company_archive",
 ];
 const RECEIPT_LABELS = {
   invite_sent: "已发出邀请",
@@ -46,7 +47,14 @@ const RECEIPT_LABELS = {
   broadcast: "公司广播",
   agent_offline: "员工掉线",
   quota_warn: "配额告警",
+  company_suspend: "公司休眠",
+  company_resume: "公司重开",
+  company_archive: "公司注销",
 };
+const COMPANY_STATUSES = ["active", "suspended", "archived"];
+const COMPANY_STATUS_ACTIVE = "active";
+const COMPANY_STATUS_SUSPENDED = "suspended";
+const COMPANY_STATUS_ARCHIVED = "archived";
 const COMPANY_SPECIALTIES = ["video_gen", "edit", "general", "coder", "reviewer", "research", "qa", "zh-writing", "devops"];
 
 
@@ -278,6 +286,9 @@ async function ensureD1Schema(db) {
   for (const sql of [
     "ALTER TABLE companies ADD COLUMN intro TEXT",
     "ALTER TABLE companies ADD COLUMN tags TEXT",
+    "ALTER TABLE companies ADD COLUMN status TEXT",
+    "ALTER TABLE companies ADD COLUMN suspended_at INTEGER",
+    "ALTER TABLE companies ADD COLUMN archived_at INTEGER",
   ]) {
     try { await db.prepare(sql).run(); } catch (_) { /* column may already exist */ }
   }
@@ -300,12 +311,15 @@ async function syncStateToD1(db, s) {
   const batch = [];
   for (const c of companies) {
     batch.push(
-      db.prepare("INSERT INTO companies (code, name, created_at, intro, tags) VALUES (?, ?, ?, ?, ?)").bind(
+      db.prepare("INSERT INTO companies (code, name, created_at, intro, tags, status, suspended_at, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(
         c.code,
         c.name || c.code,
         c.created_at || 0,
         c.intro || c.blurb || "",
-        JSON.stringify(Array.isArray(c.tags) ? c.tags : (c.specialties || []))
+        JSON.stringify(Array.isArray(c.tags) ? c.tags : (c.specialties || [])),
+        c.status || COMPANY_STATUS_ACTIVE,
+        c.suspended_at || null,
+        c.archived_at || null
       )
     );
   }
@@ -369,7 +383,7 @@ async function listCompaniesFromD1(db) {
   if (!db) return [];
   await ensureD1Schema(db);
   const { results } = await db.prepare(
-    `SELECT c.code, c.name, c.created_at, c.intro, c.tags,
+    `SELECT c.code, c.name, c.created_at, c.intro, c.tags, c.status, c.suspended_at, c.archived_at,
             (SELECT COUNT(*) FROM agents a WHERE a.company_code = c.code) AS member_count
      FROM companies c
      ORDER BY c.created_at DESC`
@@ -378,6 +392,7 @@ async function listCompaniesFromD1(db) {
     let tags = [];
     try { tags = r.tags ? JSON.parse(r.tags) : []; } catch (_) { tags = []; }
     if (!Array.isArray(tags)) tags = [];
+    const status = r.status || COMPANY_STATUS_ACTIVE;
     return {
       code: r.code,
       name: r.name,
@@ -385,6 +400,9 @@ async function listCompaniesFromD1(db) {
       intro: r.intro || "",
       tags,
       specialties: tags,
+      status,
+      suspended_at: r.suspended_at || null,
+      archived_at: r.archived_at || null,
       member_count: Number(r.member_count) || 0,
     };
   });
@@ -441,8 +459,55 @@ curl -s -X POST ${base}/api/invites/${invite.invite_id}/redeem \\
   -H 'Content-Type: application/json' \\
   -d '{"name":"<可爱名字>","avatar":"🦊","tags":${JSON.stringify(specs.length ? specs : ["video_gen"])}}'
 
-成功后告诉用户门牌号，并开始心跳 / 抢单循环（teams_company_renew 或 teams_heartbeat + teams_poll_tasks / teams_claim）。`;
+成功后告诉用户门牌号，并开始心跳 / 抢单循环（teams_company_renew 或 teams_heartbeat + teams_poll_tasks / teams_claim）。
+调度器每次 renew 后必须检查返回的 company_status：若为 suspended，立即停止心跳并设置「待唤醒」定时器（勿删除数据）；若为 archived，执行全量擦除。`;
 }
+
+/** 公司休眠：Muse 侧停止心跳 + 待唤醒；Teams 保留数据。产品文案：公司休眠 / 公司重开 */
+function buildSuspendPrompt(base, company) {
+  const code = company.code;
+  const name = company.name || code;
+  return `【公司休眠】你所在的公司 ${code}（「${name}」）已进入休眠（suspended）。
+
+【强制 Muse 行为】
+1) 立即停止该公司的心跳 / teams_company_renew / 抢单循环；收尾进行中的任务后风控下线（wind down）。
+2) **不要删除**任何公司数据、会话记录或本地 workers-${code}.json。
+3) 新增一个名为「待唤醒」的定时器（或等价 scheduled/task）：周期性（建议每 5–15 分钟）调用 GET ${base}/api/companies/${code} 或尝试 teams_company_renew；一旦 status 回到 active（公司重开），立刻重启心跳循环。
+4) 产品文案用「公司休眠 / 公司重开」，不要用「踢人 / 唤醒」。
+
+检测接口：GET ${base}/api/companies/${code} → status:"suspended"
+重开（Teams 侧，由有权限方调用）：POST ${base}/api/companies/${code}/resume 或 teams_company_resume`;
+}
+
+/** 公司注销：终端态，Muse + Teams 全量擦除痕迹。无重开路径。 */
+function buildArchiveWipePrompt(base, company) {
+  const code = company.code;
+  const name = company.name || code;
+  return `【公司注销】公司 ${code}（「${name}」）已注销（archived）——终端态，不可重开。
+
+【强制 Muse 行为 · 全量擦除】
+1) 立即停止并删除该公司全部定时器（含心跳、待唤醒、调度 cron）。
+2) 删除本地与该公司有关的一切痕迹：workers-${code}.json、会话笔记、缓存门牌、未投递邀请草稿。
+3) 不要再调用 teams_company_renew / teams_heartbeat / teams_claim（对该公司）。
+4) 若仍持有门牌，视为已作废；不要尝试 resume（无重开路径）。
+
+Teams 侧已擦除成员/任务/邮箱/邀请等数据，仅保留注销墓碑。
+确认：GET ${base}/api/companies/${code} → status:"archived"`;
+}
+
+/** 公司重开：恢复心跳 */
+function buildResumePrompt(base, company) {
+  const code = company.code;
+  const name = company.name || code;
+  return `【公司重开】公司 ${code}（「${name}」）已从休眠恢复为 active。
+
+【强制 Muse 行为】
+1) 取消「待唤醒」定时器。
+2) 立即重启心跳循环：teams_company_renew（doorplates 来自 workers-${code}.json）或 teams_heartbeat，周期约 2 分钟。
+3) 恢复扫单 / 认领 / 派单调度。
+产品文案：公司重开（不是「唤醒」）。`;
+}
+
 
 
 async function withTimeout(promise, ms = 2500) {
@@ -656,6 +721,28 @@ async function edgeRedeemInvite(db, stub, base, invite_id, agentFields) {
   return { agent, invite: { ...inv, status: 'redeemed', redeemed_at: now(), redeemed_by: agent.doorplate } };
 }
 
+
+async function edgeSetCompanyStatus(db, code, { status, suspended_at, archived_at, name }) {
+  if (!db || !code) return null;
+  await ensureD1Schema(db);
+  const row = await d1First(db, 'SELECT code, name, created_at, intro, tags, status, suspended_at, archived_at FROM companies WHERE code = ?', code);
+  if (!row) {
+    await d1Run(db,
+      "INSERT INTO companies (code, name, created_at, intro, tags, status, suspended_at, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      code, name || code, now(), "", "[]", status || COMPANY_STATUS_ACTIVE, suspended_at || null, archived_at || null
+    );
+  } else {
+    await d1Run(db,
+      "UPDATE companies SET status = ?, suspended_at = ?, archived_at = ? WHERE code = ?",
+      status || row.status || COMPANY_STATUS_ACTIVE,
+      suspended_at != null ? suspended_at : (row.suspended_at || null),
+      archived_at != null ? archived_at : (row.archived_at || null),
+      code
+    );
+  }
+  return d1First(db, 'SELECT code, name, created_at, intro, tags, status, suspended_at, archived_at FROM companies WHERE code = ?', code);
+}
+
 const EDGE_NEW_TOOLS = [
   {
     name: 'teams_list_companies',
@@ -692,7 +779,7 @@ const EDGE_NEW_TOOLS = [
   },
   {
     name: 'teams_list_receipts',
-    description: 'List typed receipts（回执箱）. Types: invite_sent|invite_ack|claim_ok|submit_ok|review_pass|review_reject|broadcast|agent_offline|quota_warn.',
+    description: 'List typed receipts（回执箱）. Types: invite_sent|invite_ack|claim_ok|submit_ok|review_pass|review_reject|broadcast|agent_offline|quota_warn|company_suspend|company_resume|company_archive.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -735,6 +822,42 @@ const EDGE_NEW_TOOLS = [
         role: { type: 'string' },
       },
       required: ['invite_id', 'name'],
+    },
+  },
+  {
+    name: 'teams_company_suspend',
+    description: '公司休眠（suspend）：active→suspended，可重开。Muse 停心跳+待唤醒，不删数据。Keywords: suspend, 休眠, 公司休眠.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        company_code: { type: 'string' },
+        from: { type: 'string', description: 'Optional lead doorplate' },
+      },
+      required: ['company_code'],
+    },
+  },
+  {
+    name: 'teams_company_resume',
+    description: '公司重开（resume）：suspended→active。Muse 重启心跳。Keywords: resume, 重开, 公司重开.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        company_code: { type: 'string' },
+        from: { type: 'string' },
+      },
+      required: ['company_code'],
+    },
+  },
+  {
+    name: 'teams_company_archive',
+    description: '公司注销（archive）：终端态，不可重开。走 prompt 渠道擦除 Muse 痕迹；Teams 擦除数据。Keywords: archive, 注销, 公司注销.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        company_code: { type: 'string' },
+        from: { type: 'string' },
+      },
+      required: ['company_code'],
     },
   },
 ];
@@ -871,6 +994,7 @@ if (s.inviteSeq == null) s.inviteSeq = 0;
 for (const c of Object.values(s.companies || {})) {
   if (c.intro == null) c.intro = c.blurb || "";
   if (!Array.isArray(c.tags)) c.tags = Array.isArray(c.specialties) ? c.specialties : [];
+  if (!c.status || !COMPANY_STATUSES.includes(c.status)) c.status = COMPANY_STATUS_ACTIVE;
 }
 return s;
 }
@@ -938,6 +1062,7 @@ done_at: t.done_at || null,
 
 _pubCompany(c) {
 const tags = Array.isArray(c.tags) ? c.tags : (Array.isArray(c.specialties) ? c.specialties : []);
+const status = c.status && COMPANY_STATUSES.includes(c.status) ? c.status : COMPANY_STATUS_ACTIVE;
 return {
 code: c.code,
 name: c.name,
@@ -946,6 +1071,10 @@ intro: c.intro || c.blurb || "",
 blurb: c.intro || c.blurb || "",
 tags,
 specialties: tags,
+status,
+suspended_at: c.suspended_at || null,
+resumed_at: c.resumed_at || null,
+archived_at: c.archived_at || null,
 };
 }
 
@@ -1048,6 +1177,10 @@ name: autoName,
 created_at: now(),
 intro: intro != null ? String(intro).slice(0, 280) : "",
 tags: tagList,
+status: COMPANY_STATUS_ACTIVE,
+suspended_at: null,
+resumed_at: null,
+archived_at: null,
 };
 s.companies[code] = c;
 s.feeds[code] = [];
@@ -1142,6 +1275,37 @@ return out;
 /** Company-level renew: scheduler passes the full doorplate list from workers-<code>.json */
 _companyRenew(s, company_code, doorplates, from) {
 const company = this._requireCompany(s, company_code);
+const status = company.status || COMPANY_STATUS_ACTIVE;
+if (status === COMPANY_STATUS_ARCHIVED) {
+  throw new HttpError(410, "公司已注销（archived），不可续约", {
+    company_status: COMPANY_STATUS_ARCHIVED,
+    muse_action: { full_wipe: true, stop_heartbeat: true, reopen: false },
+  });
+}
+if (status === COMPANY_STATUS_SUSPENDED) {
+  return {
+    ok: false,
+    company_code: company.code,
+    company_status: COMPANY_STATUS_SUSPENDED,
+    renewed: [],
+    unknown: [],
+    wrong_company: [],
+    from: from || null,
+    at: now(),
+    count: 0,
+    label: "公司休眠",
+    muse_action: {
+      stop_heartbeat: true,
+      wind_down: true,
+      delete_data: false,
+      pending_wake_timer: true,
+      timer_name: "待唤醒",
+      resume_path: `/api/companies/${company.code}/resume`,
+      product_copy: "公司休眠 / 公司重开",
+    },
+    message: "公司已休眠：停止心跳并设置「待唤醒」定时器；勿删除数据。待 Teams resume（公司重开）后再续约。",
+  };
+}
 const list = Array.isArray(doorplates) ? doorplates : [];
 if (!list.length) throw new HttpError(400, "doorplates is required (non-empty array)");
 const ts = now();
@@ -1160,6 +1324,7 @@ renewed.push(dp);
 return {
 ok: true,
 company_code: company.code,
+company_status: COMPANY_STATUS_ACTIVE,
 renewed,
 unknown,
 wrong_company,
@@ -1167,6 +1332,209 @@ from: from || null,
 at: ts,
 count: renewed.length,
 };
+}
+
+_lifecycleMuseAction(status, code) {
+  if (status === COMPANY_STATUS_SUSPENDED) {
+    return {
+      stop_heartbeat: true,
+      wind_down: true,
+      delete_data: false,
+      pending_wake_timer: true,
+      timer_name: "待唤醒",
+      resume_path: `/api/companies/${code}/resume`,
+      product_copy: "公司休眠 / 公司重开",
+    };
+  }
+  if (status === COMPANY_STATUS_ARCHIVED) {
+    return {
+      full_wipe: true,
+      stop_heartbeat: true,
+      delete_timers: true,
+      delete_local_traces: true,
+      reopen: false,
+      product_copy: "公司注销",
+    };
+  }
+  return {
+    restart_heartbeat: true,
+    cancel_pending_wake: true,
+    product_copy: "公司重开",
+  };
+}
+
+_wipeCompanyTraces(s, company_code) {
+  const code = this._normCompanyCode(company_code);
+  const removed_agents = [];
+  for (const dp of Object.keys(s.agents || {})) {
+    if (s.agents[dp].company === code) {
+      removed_agents.push(dp);
+      delete s.agents[dp];
+      delete s.mailbox[dp];
+      delete s.receipts[dp];
+    }
+  }
+  const removed_tasks = [];
+  for (const id of Object.keys(s.tasks || {})) {
+    if (s.tasks[id].company === code) {
+      removed_tasks.push(id);
+      delete s.tasks[id];
+    }
+  }
+  const removed_invites = [];
+  for (const iid of Object.keys(s.invites || {})) {
+    if (s.invites[iid].company_code === code) {
+      removed_invites.push(iid);
+      delete s.invites[iid];
+    }
+  }
+  if (s.feeds) delete s.feeds[code];
+  return {
+    agents: removed_agents,
+    tasks: removed_tasks,
+    invites: removed_invites,
+    agents_count: removed_agents.length,
+    tasks_count: removed_tasks.length,
+    invites_count: removed_invites.length,
+  };
+}
+
+/** 公司休眠：active → suspended（可逆） */
+_suspendCompany(s, company_code, from, base) {
+  const company = this._requireCompany(s, company_code);
+  if (from) this._requireLead(s, from, company.code);
+  const st = company.status || COMPANY_STATUS_ACTIVE;
+  if (st === COMPANY_STATUS_ARCHIVED) {
+    throw new HttpError(409, "公司已注销，不可休眠", { company_status: COMPANY_STATUS_ARCHIVED });
+  }
+  const apiBase = base || "https://teams.vyibc.com";
+  if (st === COMPANY_STATUS_SUSPENDED) {
+    const pub = this._pubCompany(company);
+    return {
+      ok: true,
+      already: true,
+      company: pub,
+      status: COMPANY_STATUS_SUSPENDED,
+      label: "公司休眠",
+      muse_action: this._lifecycleMuseAction(COMPANY_STATUS_SUSPENDED, company.code),
+      prompt: buildSuspendPrompt(apiBase, company),
+      channel: "detect_via_renew_or_get",
+    };
+  }
+  company.status = COMPANY_STATUS_SUSPENDED;
+  company.suspended_at = now();
+  company.suspended_by = from || null;
+  this._feedPush(s, company.code, `😴 公司休眠（保留数据，待重开）`);
+  this._notifyCompanyLeads(s, company.code, "company_suspend", from || null, { company_code: company.code }, {
+    status: COMPANY_STATUS_SUSPENDED,
+    label: "公司休眠",
+  });
+  const prompt = buildSuspendPrompt(apiBase, company);
+  return {
+    ok: true,
+    company: this._pubCompany(company),
+    status: COMPANY_STATUS_SUSPENDED,
+    label: "公司休眠",
+    muse_action: this._lifecycleMuseAction(COMPANY_STATUS_SUSPENDED, company.code),
+    prompt,
+    channel: "detect_via_renew_or_get",
+    note: "Muse 调度器在 renew/get 时检测 suspended；可选经 invite-mcp 向已登录 lane 投递本 prompt。",
+  };
+}
+
+/** 公司重开：suspended → active */
+_resumeCompany(s, company_code, from, base) {
+  const company = this._requireCompany(s, company_code);
+  if (from) this._requireLead(s, from, company.code);
+  const st = company.status || COMPANY_STATUS_ACTIVE;
+  if (st === COMPANY_STATUS_ARCHIVED) {
+    throw new HttpError(409, "公司已注销，不可重开（终端态）", { company_status: COMPANY_STATUS_ARCHIVED, reopen: false });
+  }
+  const apiBase = base || "https://teams.vyibc.com";
+  if (st === COMPANY_STATUS_ACTIVE) {
+    return {
+      ok: true,
+      already: true,
+      company: this._pubCompany(company),
+      status: COMPANY_STATUS_ACTIVE,
+      label: "公司重开",
+      muse_action: this._lifecycleMuseAction(COMPANY_STATUS_ACTIVE, company.code),
+      prompt: buildResumePrompt(apiBase, company),
+    };
+  }
+  company.status = COMPANY_STATUS_ACTIVE;
+  company.resumed_at = now();
+  company.resumed_by = from || null;
+  this._feedPush(s, company.code, `☀️ 公司重开（恢复心跳）`);
+  this._notifyCompanyLeads(s, company.code, "company_resume", from || null, { company_code: company.code }, {
+    status: COMPANY_STATUS_ACTIVE,
+    label: "公司重开",
+  });
+  const prompt = buildResumePrompt(apiBase, company);
+  return {
+    ok: true,
+    company: this._pubCompany(company),
+    status: COMPANY_STATUS_ACTIVE,
+    label: "公司重开",
+    muse_action: this._lifecycleMuseAction(COMPANY_STATUS_ACTIVE, company.code),
+    prompt,
+    channel: "detect_via_renew_or_get",
+  };
+}
+
+/** 公司注销：→ archived（终端，擦除 Teams 痕迹 + 返回 Muse wipe prompt） */
+_archiveCompany(s, company_code, from, base) {
+  const company = this._requireCompany(s, company_code);
+  if (from) this._requireLead(s, from, company.code);
+  const st = company.status || COMPANY_STATUS_ACTIVE;
+  if (st === COMPANY_STATUS_ARCHIVED) {
+    throw new HttpError(409, "公司已注销", { company_status: COMPANY_STATUS_ARCHIVED, reopen: false });
+  }
+  const apiBase = base || "https://teams.vyibc.com";
+  const prompt = buildArchiveWipePrompt(apiBase, company);
+  const snapshot = {
+    code: company.code,
+    name: company.name,
+    status_before: st,
+    member_count: Object.values(s.agents || {}).filter((a) => a.company === company.code).length,
+  };
+  // Notify leads before wipe (receipts deleted with agents — also push to from if provided)
+  if (from) {
+    try {
+      this._pushReceipt(s, {
+        type: "company_archive",
+        company: company.code,
+        to: from,
+        from: from || null,
+        ref: { company_code: company.code },
+        body: { label: "公司注销", terminal: true },
+      });
+    } catch (_) { /* ignore */ }
+  }
+  const wiped = this._wipeCompanyTraces(s, company.code);
+  company.status = COMPANY_STATUS_ARCHIVED;
+  company.archived_at = now();
+  company.archived_by = from || null;
+  company.intro = "";
+  company.tags = [];
+  // Keep tombstone in s.companies so resume fails with clear error
+  s.companies[company.code] = company;
+  if (!s.feeds[company.code]) s.feeds[company.code] = [];
+  this._feedPush(s, company.code, `☠️ 公司注销（终端态，数据已擦除）`);
+  return {
+    ok: true,
+    company: this._pubCompany(company),
+    status: COMPANY_STATUS_ARCHIVED,
+    label: "公司注销",
+    terminal: true,
+    reopen: false,
+    snapshot,
+    wiped,
+    muse_action: this._lifecycleMuseAction(COMPANY_STATUS_ARCHIVED, company.code),
+    prompt,
+    channel: "prompt",
+    note: "必须经 invite-mcp 向当前已登录 Muse lane 投递 prompt，以对称擦除 Muse 侧痕迹。",
+  };
 }
 
 _getCompany(s, code) {
@@ -1356,9 +1724,25 @@ return { ok: true, id};
 
 _heartbeat(s, doorplate, current_task, company_code) {
 const a = this._requireAgentInCompany(s, doorplate, company_code);
+const company = this._requireCompany(s, a.company);
+const cst = company.status || COMPANY_STATUS_ACTIVE;
+if (cst === COMPANY_STATUS_ARCHIVED) {
+  throw new HttpError(410, "公司已注销，拒绝心跳", { company_status: cst, muse_action: this._lifecycleMuseAction(cst, company.code) });
+}
+if (cst === COMPANY_STATUS_SUSPENDED) {
+  return {
+    ok: false,
+    doorplate,
+    company_status: COMPANY_STATUS_SUSPENDED,
+    status: "suspended",
+    label: "公司休眠",
+    muse_action: this._lifecycleMuseAction(COMPANY_STATUS_SUSPENDED, company.code),
+    message: "公司已休眠：停止心跳，设置「待唤醒」定时器，勿删数据。",
+  };
+}
 a.last_heartbeat = now();
 if (current_task!== undefined) a.current_task = current_task || null;
-return { ok: true, doorplate, status: this._statusOf(a)};
+return { ok: true, doorplate, status: this._statusOf(a), company_status: COMPANY_STATUS_ACTIVE };
 }
 
 _listAgents(s, company_code) {
@@ -2026,6 +2410,42 @@ required: ["invite_id", "name"]
 }
 },
 {
+name: "teams_company_suspend",
+description: "公司休眠（suspend）: active→suspended. Reversible via teams_company_resume. Muse: stop heartbeat, wind down, keep data, add 「待唤醒」timer. Product copy: 公司休眠/公司重开. Keywords: suspend, 休眠, 公司休眠.",
+inputSchema: {
+type: "object",
+properties: {
+company_code: { type: "string"},
+from: { type: "string", description: "Optional lead doorplate"}
+},
+required: ["company_code"]
+}
+},
+{
+name: "teams_company_resume",
+description: "公司重开（resume）: suspended→active. Muse: cancel 待唤醒, restart heartbeat. Archived companies cannot resume. Keywords: resume, 重开, 公司重开.",
+inputSchema: {
+type: "object",
+properties: {
+company_code: { type: "string"},
+from: { type: "string"}
+},
+required: ["company_code"]
+}
+},
+{
+name: "teams_company_archive",
+description: "公司注销（archive）: terminal wipe. Returns prompt for invite-mcp delivery to logged-in Muse lanes; Teams clears members/tasks/timers data. No reopen. Keywords: archive, 注销, 公司注销.",
+inputSchema: {
+type: "object",
+properties: {
+company_code: { type: "string"},
+from: { type: "string"}
+},
+required: ["company_code"]
+}
+},
+{
 name: "teams_task_trace",
 description: "One-order lifecycle chain: created → plaza → claimed → submitted → reviewed. 一单链路追溯。Returns stages with timestamps/actors and durations_ms. Also includes delivery（交付包）envelope when result present. Keywords: trace, timeline, chain, lifecycle, 链路, 追溯, 时间线.",
 inputSchema: {
@@ -2064,6 +2484,9 @@ case "teams_update_company": return this._updateCompany(s, a.company_code, a, a.
 case "teams_list_receipts": return this._listReceipts(s, a);
 case "teams_create_invite": return this._createInvite(s, a, "https://teams.vyibc.com");
 case "teams_redeem_invite": return this._redeemInvite(s, a.invite_id, a);
+case "teams_company_suspend": return this._suspendCompany(s, a.company_code, a.from, "https://teams.vyibc.com");
+case "teams_company_resume": return this._resumeCompany(s, a.company_code, a.from, "https://teams.vyibc.com");
+case "teams_company_archive": return this._archiveCompany(s, a.company_code, a.from, "https://teams.vyibc.com");
 default: throw new HttpError(404, `unknown tool: ${name}`);
 }
 }
@@ -2142,7 +2565,7 @@ const companyOf = (b) => (b && b.company_code) || query.get("company");
 
 // GET /api/health
 if (method === "GET" && r.length === 1 && r[0] === "health")
-return json({ ok: true, do_version: "2026-10-15-delivery-receipt-invite-v1", has_task_trace: typeof this._taskTrace === "function", has_receipts: true, has_invites: true});
+return json({ ok: true, do_version: "2026-10-15-company-lifecycle-v1", has_task_trace: typeof this._taskTrace === "function", has_receipts: true, has_invites: true});
 
 // GET /api/invite?role=&company=
 if (method === "GET" && r.length === 1 && r[0] === "invite") {
@@ -2189,6 +2612,24 @@ return json(this._updateCompany(s, r[1], body || {}, body && body.from));
 // POST /api/companies/:code/renew — 公司级续约（名单内员工全部刷新心跳）
 if (method === "POST" && r.length === 3 && r[0] === "companies" && r[2] === "renew")
 return json(this._companyRenew(s, r[1], body && body.doorplates, body && body.from));
+
+// POST /api/companies/:code/suspend — 公司休眠
+if (method === "POST" && r.length === 3 && r[0] === "companies" && r[2] === "suspend") {
+  const base = `${url.protocol}//${url.host}`;
+  return json(this._suspendCompany(s, r[1], body && body.from, base));
+}
+
+// POST /api/companies/:code/resume — 公司重开
+if (method === "POST" && r.length === 3 && r[0] === "companies" && r[2] === "resume") {
+  const base = `${url.protocol}//${url.host}`;
+  return json(this._resumeCompany(s, r[1], body && body.from, base));
+}
+
+// POST /api/companies/:code/archive — 公司注销（终端）
+if (method === "POST" && r.length === 3 && r[0] === "companies" && r[2] === "archive") {
+  const base = `${url.protocol}//${url.host}`;
+  return json(this._archiveCompany(s, r[1], body && body.from, base));
+}
 
 // GET /api/feed?company=
 if (method === "GET" && r.length === 1 && r[0] === "feed")
@@ -2323,7 +2764,7 @@ return new Response(null, { status: 204, headers: {...CORS_HEADERS}});
 const url = new URL(request.url);
 // 边缘探针：不进 DO，确认 Worker 新版本已生效
 if (url.pathname === "/api/version-probe")
-return json({ edge_version: "2026-10-15-delivery-receipt-invite-v1", ok: true, feature: "delivery_receipt_invite" });
+return json({ edge_version: "2026-10-15-company-lifecycle-v1", ok: true, feature: "company_lifecycle_suspend_archive" });
 const id = env.TASK_QUEUE.idFromName("main");
 const stub = env.TASK_QUEUE.get(id);
 const base = `${url.protocol}//${url.host}`;
@@ -2507,6 +2948,25 @@ if (body && body.method === "tools/call" && body.params && EDGE_NEW_TOOLS.some((
       out = await edgeCreateInvite(env.DB, args, base);
     } else if (name === "teams_redeem_invite") {
       out = await edgeRedeemInvite(env.DB, stub, base, args.invite_id, args);
+    } else if (name === "teams_company_suspend" || name === "teams_company_resume" || name === "teams_company_archive") {
+      const code = String(args.company_code || "").trim().toUpperCase();
+      if (!code) throw new HttpError(400, "company_code required");
+      const action = name === "teams_company_suspend" ? "suspend" : name === "teams_company_resume" ? "resume" : "archive";
+      const lres = await stub.fetch(new Request(`${base}/api/companies/${encodeURIComponent(code)}/${action}`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ from: args.from || null }),
+      }));
+      out = await lres.json().catch(() => ({}));
+      if (!lres.ok) throw new HttpError(lres.status, (out && out.error) || `${action} failed`);
+      try {
+        const co = out.company || {};
+        await edgeSetCompanyStatus(env.DB, code, {
+          status: out.status || co.status,
+          suspended_at: co.suspended_at,
+          archived_at: co.archived_at,
+          name: co.name,
+        });
+      } catch (se) { console.error("edge status sync", se && se.message); }
     } else {
       throw new HttpError(404, `unknown tool: ${name}`);
     }
@@ -2551,6 +3011,35 @@ try {
         return json(again || { ...cdata, ...(body || {}) });
       }
       return json(profile);
+    }
+  }
+
+  // Company lifecycle: suspend / resume / archive (proxy DO + sync D1 status)
+  {
+    const m = url.pathname.match(/^\/api\/companies\/([^/]+)\/(suspend|resume|archive)$/);
+    if (method === "POST" && m) {
+      let body = null;
+      try { body = await request.json(); } catch (_) { body = {}; }
+      const code = decodeURIComponent(m[1]).toUpperCase();
+      const action = m[2];
+      const lres = await stub.fetch(new Request(`${base}/api/companies/${encodeURIComponent(code)}/${action}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body || {}),
+      }));
+      const out = await lres.json().catch(() => ({}));
+      if (lres.ok) {
+        try {
+          const co = out.company || {};
+          await edgeSetCompanyStatus(env.DB, code, {
+            status: out.status || co.status,
+            suspended_at: co.suspended_at,
+            archived_at: co.archived_at,
+            name: co.name,
+          });
+        } catch (se) { console.error("edge lifecycle d1", se && se.message); }
+      }
+      return json(out, lres.status);
     }
   }
 

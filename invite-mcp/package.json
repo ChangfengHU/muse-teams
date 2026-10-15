@@ -1,9 +1,9 @@
 {
   "name": "muse-teams-invite-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Channel invite MCP for Muse Teams 代企业入驻 — compose + deliver prompts to Muse-logged Linux sessions. Separate from core Teams MCP because we cannot MCP-SSH into those machines.",
+  "description": "Channel invite MCP for Muse Teams \u4ee3\u4f01\u4e1a\u5165\u9a7b \u2014 compose + deliver prompts to Muse-logged Linux sessions. Separate from core Teams MCP because we cannot MCP-SSH into those machines.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

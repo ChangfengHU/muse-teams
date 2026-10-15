@@ -41,6 +41,11 @@ function CompanyCard({ item, active, liveMembers, onSelect }) {
         <div className="co-card-title">
           <div className="co-card-name">{item.name || item.code}</div>
           <span className="co-code-badge">{item.code}</span>
+          {item.status && item.status !== 'active' ? (
+            <span className="co-code-badge" style={{ marginLeft: 6 }}>
+              {item.status === 'suspended' ? '休眠' : item.status === 'archived' ? '已注销' : item.status}
+            </span>
+          ) : null}
         </div>
         {active && <span className="co-card-pill">✨ 当前</span>}
       </div>
@@ -95,6 +100,8 @@ export default function Companies({ company, agents, onSelectCompany, onToast })
   const [page, setPage] = useState(1);
   const [showJoin, setShowJoin] = useState(false);
   const [createPulse, setCreatePulse] = useState(false);
+  const [lifeBusy, setLifeBusy] = useState(false);
+  const [lifePrompt, setLifePrompt] = useState('');
   const currentCode = (company && company.code) || getCompany() || '';
 
   const toast = useCallback((msg, isErr) => {
@@ -210,6 +217,36 @@ export default function Companies({ company, agents, onSelectCompany, onToast })
       toast('复制失败，请手动选择复制', true);
     }
   };
+
+  const runLifecycle = async (action) => {
+    const code = currentCode;
+    if (!code) { toast('先选一家公司', true); return; }
+    const labels = { suspend: '公司休眠', resume: '公司重开', archive: '公司注销' };
+    const label = labels[action] || action;
+    if (action === 'archive') {
+      const ok = window.confirm(`确认「${label}」${code}？此操作不可重开，将擦除公司数据。`);
+      if (!ok) return;
+    } else if (action === 'suspend') {
+      const ok = window.confirm(`确认「${label}」${code}？可之后公司重开；数据保留。`);
+      if (!ok) return;
+    }
+    setLifeBusy(true);
+    try {
+      const fn = action === 'suspend' ? api.companySuspend
+        : action === 'resume' ? api.companyResume
+        : api.companyArchive;
+      const out = await fn(code);
+      setLifePrompt(out.prompt || '');
+      toast(`${label}成功 · status=${out.status || (out.company && out.company.status)}`);
+      await loadCompanies(true);
+      if (out.company) onSelectCompany && onSelectCompany(out.company);
+    } catch (e) {
+      toast(`${label}失败: ` + (e.message || e), true);
+    } finally {
+      setLifeBusy(false);
+    }
+  };
+
 
   const createOne = async () => {
     setBusy(true);
@@ -536,6 +573,37 @@ export default function Companies({ company, agents, onSelectCompany, onToast })
               style={{ width: '100%' }}
             />
           </div>
+        </section>
+      )}
+
+      {selected && (
+        <section className="co-profile" style={{ marginTop: 12 }}>
+          <header className="co-invite-head">
+            <div>
+              <div className="co-invite-title">公司生命周期</div>
+              <div className="co-invite-sub">
+                状态：{(selected.status || (company && company.status) || 'active')}
+                {' · '}休眠可重开；注销为终端态（走 prompt 渠道擦除 Muse）
+              </div>
+            </div>
+            <div className="co-invite-actions">
+              <button type="button" className="btn btn-sm btn-ghost" disabled={lifeBusy}
+                onClick={() => runLifecycle('suspend')}>公司休眠</button>
+              <button type="button" className="btn btn-sm" disabled={lifeBusy}
+                onClick={() => runLifecycle('resume')}>公司重开</button>
+              <button type="button" className="btn btn-sm btn-ghost" disabled={lifeBusy}
+                style={{ color: '#b42318' }}
+                onClick={() => runLifecycle('archive')}>公司注销</button>
+            </div>
+          </header>
+          {lifePrompt ? (
+            <div className="field co-invite-field" style={{ marginTop: 10 }}>
+              <label>生命周期 prompt（可经 invite-mcp 投递给已登录 Muse）</label>
+              <textarea rows={6} readOnly value={lifePrompt} className="co-invite-ta" />
+              <button type="button" className="btn btn-sm" style={{ marginTop: 8 }}
+                onClick={() => copy(lifePrompt, '生命周期 prompt 已复制')}>复制 prompt</button>
+            </div>
+          ) : null}
         </section>
       )}
 

@@ -23,6 +23,19 @@ TaskQueue (Durable Object, 单例 "main")
 - **D1 索引**：companies / agents / tasks 同步到 D1，供 `GET /api/companies` 与 Muse 发现；DO 仍是抢单权威源。
 - v1 无鉴权（fleet 内网）。
 
+## 公司生命周期（2026-10-15）
+
+状态机：`active → suspended → archived`
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/companies/:code/suspend` | 公司休眠（可重开；保留数据） |
+| POST | `/api/companies/:code/resume` | 公司重开 |
+| POST | `/api/companies/:code/archive` | 公司注销（终端；擦除 Teams 数据 + 返回 Muse wipe prompt） |
+
+MCP：`teams_company_suspend` / `teams_company_resume` / `teams_company_archive`  
+渠道投递注销 prompt：invite-mcp `invite_lifecycle_compose` + `invite_deliver`（仅已登录 Muse lane）
+
 ## API 一览（JSON 进出）
 
 | 方法 | 路径 | 说明 |

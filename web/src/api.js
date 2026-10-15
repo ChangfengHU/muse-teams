@@ -126,6 +126,22 @@ companyRenew: (code, doorplates, from) =>
     ...(from ? { from } : {}),
   }),
 
+/** 公司休眠：active→suspended（可重开） */
+companySuspend: (code, from) =>
+  request(`/api/companies/${encodeURIComponent(String(code).trim().toUpperCase())}/suspend`, 'POST', {
+    ...(from ? { from } : {}),
+  }),
+/** 公司重开：suspended→active */
+companyResume: (code, from) =>
+  request(`/api/companies/${encodeURIComponent(String(code).trim().toUpperCase())}/resume`, 'POST', {
+    ...(from ? { from } : {}),
+  }),
+/** 公司注销：终端态，不可重开 */
+companyArchive: (code, from) =>
+  request(`/api/companies/${encodeURIComponent(String(code).trim().toUpperCase())}/archive`, 'POST', {
+    ...(from ? { from } : {}),
+  }),
+
 // 只读（全部按公司过滤）
 agents: () => request(`/api/agents?company=${encodeURIComponent(needCompany())}`),
 /** 按公司码拉员工，不读写当前选中公司 */
