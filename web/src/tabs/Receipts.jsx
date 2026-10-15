@@ -11,7 +11,7 @@ const TYPE_META = {
   review_pass: { icon: '🎉', label: '验收通过' },
   review_reject: { icon: '↩️', label: '验收打回' },
   broadcast: { icon: '📢', label: '公司广播' },
-  agent_offline: { icon: '💤', label: '员工掉线' },
+  agent_offline: { icon: '💤', label: '员工休眠' },
   quota_warn: { icon: '⚠️', label: '配额告警' },
 };
 

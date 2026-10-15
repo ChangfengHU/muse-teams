@@ -24,7 +24,9 @@
 * 跨公司收件一律 403。
 */
 
-const HEARTBEAT_TTL_MS = 180_000; // 调度器每 120s 跑一次，TTL 必须大于周期，防假离线
+const HEARTBEAT_TTL_MS = 180_000; // 调度器每 120s 跑一次，TTL 必须大于周期
+// 无心跳超过 TTL → 员工 status=dormant（休眠员工）；公司无人有新鲜心跳 → heartbeat_dormant（休眠公司，衍生字段，不改 status）
+// 手动 suspended/archived 仍写 status，优先于衍生休眠；claim/create/join 门控只看 status，不因 heartbeat_dormant 拦截
 const FEED_CAP = 100;
 const AVATARS = ["🦊", "🐼", "🦁", "🐯", "🦉", "🐬", "🦄", "🐝", "🦋", "🐙", "🦔", "🐳"];
 const COMPANY_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
@@ -45,7 +47,7 @@ const RECEIPT_LABELS = {
   review_pass: "验收通过",
   review_reject: "验收打回",
   broadcast: "公司广播",
-  agent_offline: "员工掉线",
+  agent_offline: "员工休眠",
   quota_warn: "配额告警",
   company_suspend: "公司休眠",
   company_resume: "公司重开",
@@ -121,6 +123,8 @@ CREATE TABLE IF NOT EXISTS agents (
   model TEXT,
   last_heartbeat INTEGER,
   current_task TEXT,
+  muse_account TEXT,
+  muse_session TEXT,
   PRIMARY KEY (company_code, doorplate)
 );
 CREATE TABLE IF NOT EXISTS tasks (
@@ -290,6 +294,8 @@ async function ensureD1Schema(db) {
     "ALTER TABLE companies ADD COLUMN status TEXT",
     "ALTER TABLE companies ADD COLUMN suspended_at INTEGER",
     "ALTER TABLE companies ADD COLUMN archived_at INTEGER",
+    "ALTER TABLE agents ADD COLUMN muse_account TEXT",
+    "ALTER TABLE agents ADD COLUMN muse_session TEXT",
   ]) {
     try { await db.prepare(sql).run(); } catch (_) { /* column may already exist */ }
   }
@@ -375,8 +381,8 @@ async function syncStateToD1(db, s) {
     if (a.company && archivedCodes.has(a.company)) continue;
     batch.push(
       db.prepare(
-        `INSERT INTO agents (doorplate, company_code, name, avatar, tags, role, model, last_heartbeat, current_task)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO agents (doorplate, company_code, name, avatar, tags, role, model, last_heartbeat, current_task, muse_account, muse_session)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).bind(
         a.doorplate,
         a.company || "",
@@ -386,7 +392,9 @@ async function syncStateToD1(db, s) {
         a.role || "member",
         a.model || null,
         a.last_heartbeat || null,
-        a.current_task || null
+        a.current_task || null,
+        a.muse_account || null,
+        a.muse_session || null
       )
     );
   }
@@ -432,17 +440,23 @@ async function syncStateToD1(db, s) {
 async function listCompaniesFromD1(db) {
   if (!db) return [];
   await ensureD1Schema(db);
+  const liveAfter = now() - HEARTBEAT_TTL_MS;
   const { results } = await db.prepare(
     `SELECT c.code, c.name, c.created_at, c.intro, c.tags, c.status, c.suspended_at, c.archived_at,
-            (SELECT COUNT(*) FROM agents a WHERE a.company_code = c.code) AS member_count
+            (SELECT COUNT(*) FROM agents a WHERE a.company_code = c.code) AS member_count,
+            (SELECT COUNT(*) FROM agents a WHERE a.company_code = c.code
+              AND a.last_heartbeat IS NOT NULL AND a.last_heartbeat > ?) AS live_count
      FROM companies c
      ORDER BY c.created_at DESC`
-  ).all();
-  return (results || []).map((r) => {
+  ).bind(liveAfter).all();
+  const mapped = (results || []).map((r) => {
     let tags = [];
     try { tags = r.tags ? JSON.parse(r.tags) : []; } catch (_) { tags = []; }
     if (!Array.isArray(tags)) tags = [];
     const status = r.status || COMPANY_STATUS_ACTIVE;
+    const live_count = Number(r.live_count) || 0;
+    // archived 永不算「有心跳」展示优先；其余：无人新鲜心跳 → 休眠公司（衍生，不改 status）
+    const heartbeat_dormant = status === COMPANY_STATUS_ARCHIVED ? true : live_count === 0;
     return {
       code: r.code,
       name: r.name,
@@ -454,8 +468,21 @@ async function listCompaniesFromD1(db) {
       suspended_at: r.suspended_at || null,
       archived_at: r.archived_at || null,
       member_count: Number(r.member_count) || 0,
+      live_count,
+      heartbeat_dormant,
     };
   });
+  // 有心跳的公司排前面（UI 默认只展示这些；休眠仍可通过搜索找到）
+  mapped.sort((a, b) => {
+    const da = a.heartbeat_dormant ? 1 : 0;
+    const db_ = b.heartbeat_dormant ? 1 : 0;
+    if (da !== db_) return da - db_;
+    const na = a.member_count || 0;
+    const nb = b.member_count || 0;
+    if (nb !== na) return nb - na;
+    return (b.created_at || 0) - (a.created_at || 0);
+  });
+  return mapped;
 }
 
 /** Delivery package（交付包）envelope — field name stays `result` internally. */
@@ -1042,7 +1069,7 @@ curl -s -X POST ${base}/api/agents/register \\
 2) 拿到门牌号后，主 agent 立即执行，无需用户确认：
    ① 把旁聊会话立刻改名为正式格式：「{worker名} {头像} · {公司名}」，例如「小狸 🦊 · 月白星图」「豆包 🫘 · 毛怪工作室-78CR」。禁止用「月白星图 · 新成员注册」这类阶段名。注册前可用临时名；一旦拿到 doorplate + name + avatar，马上改成正式名；
    ② 把 门牌号→旁聊chat_id 写入该公司专属名单文件（如 workers-${company}.json），不混入其他公司（尤其不要写入 C-0001 或 workers.json 混用名单）；
-   ③ 为该公司创建专属调度器（cron，每 2 分钟：对账、公司续约心跳、自动验收、扫单认领、派单到窗口、查信），与其他公司调度器完全独立。调度器应优先调用 teams_company_renew（或 POST ${base}/api/companies/${company}/renew），body 带该公司 workers-${company}.json 里的全部门牌号数组 doorplates + 可选 from:"scheduler"——一次给名单内全部员工续心跳；名单里没有的员工自然过期离线。仍可用 teams_heartbeat 给单个门牌保活。超过 HEARTBEAT_TTL（180 秒）无心跳会显示离线；
+   ③ 为该公司创建专属调度器（cron，每 2 分钟：对账、公司续约心跳、自动验收、扫单认领、派单到窗口、查信），与其他公司调度器完全独立。调度器应优先调用 teams_company_renew（或 POST ${base}/api/companies/${company}/renew），body 带该公司 workers-${company}.json 里的全部门牌号数组 doorplates + 可选 from:"scheduler"——一次给名单内全部员工续心跳；名单里没有的员工自然过期休眠。仍可用 teams_heartbeat 给单个门牌保活。超过 HEARTBEAT_TTL（180 秒）无心跳会显示休眠员工；
    ④ 完成后向用户汇报一句话：「调度器已创建并接管，门牌号 <doorplate> 心跳正常」。
 
 （调度器派单到你窗口后）
@@ -1076,7 +1103,7 @@ curl -s -X POST ${base}/api/agents/register \\
 2) 拿到门牌号后，主 agent 立即执行，无需用户确认：
    ① 把旁聊会话立刻改名为正式格式：「{worker名} {头像} · {公司名}」，例如「小狸 🦊 · 月白星图」「豆包 🫘 · 毛怪工作室-78CR」。禁止用「某某公司 · 新成员注册」这类阶段名。注册前可用临时名；一旦拿到 doorplate + name + avatar，马上改成正式名；
    ② 把 门牌号→旁聊chat_id 写入该公司专属名单文件（如 workers-<company_code>.json，用注册返回的公司码），不混入其他公司（尤其不要写入 C-0001 或 workers.json 混用名单）；
-   ③ 为该公司创建专属调度器（cron，每 2 分钟：对账、公司续约心跳、自动验收、扫单认领、派单到窗口、查信），与其他公司调度器完全独立。调度器应优先调用 teams_company_renew（或 POST ${base}/api/companies/<company_code>/renew），body 带该公司名单全部门牌号 doorplates + 可选 from:"scheduler"——一次续约名单内全部员工；名单外员工自然过期离线。仍可用 teams_heartbeat 给单个门牌保活。超过 HEARTBEAT_TTL（180 秒）无心跳会显示离线；
+   ③ 为该公司创建专属调度器（cron，每 2 分钟：对账、公司续约心跳、自动验收、扫单认领、派单到窗口、查信），与其他公司调度器完全独立。调度器应优先调用 teams_company_renew（或 POST ${base}/api/companies/<company_code>/renew），body 带该公司名单全部门牌号 doorplates + 可选 from:"scheduler"——一次续约名单内全部员工；名单外员工自然过期休眠。仍可用 teams_heartbeat 给单个门牌保活。超过 HEARTBEAT_TTL（180 秒）无心跳会显示休眠员工；
    ④ 完成后向用户汇报一句话：「调度器已创建并接管，门牌号 <doorplate> 心跳正常」。
 
 （调度器派单到你窗口后）
@@ -1153,9 +1180,22 @@ if (f.length > FEED_CAP) f.length = FEED_CAP;
 }
 
 _statusOf(a) {
-if (!a.last_heartbeat) return "offline";
-if (now() - a.last_heartbeat > HEARTBEAT_TTL_MS) return "offline";
-return a.current_task? "busy": "online";
+// dormant = 休眠员工（无心跳 / 心跳过期）；busy/online 才算活着
+if (!a || !a.last_heartbeat) return "dormant";
+if (now() - a.last_heartbeat > HEARTBEAT_TTL_MS) return "dormant";
+return a.current_task ? "busy" : "online";
+}
+
+_isAgentLive(a) {
+  const st = this._statusOf(a);
+  return st === "online" || st === "busy";
+}
+
+_companyHeartbeatDormant(s, code) {
+  const c = (s.companies || {})[this._normCompanyCode(code)];
+  if (c && (c.status || COMPANY_STATUS_ACTIVE) === COMPANY_STATUS_ARCHIVED) return true;
+  const agents = Object.values(s.agents || {}).filter((a) => a.company === this._normCompanyCode(code));
+  return !agents.some((a) => this._isAgentLive(a));
 }
 
 _pubAgent(a) {
@@ -1170,6 +1210,9 @@ role: a.role || "member",
 status: this._statusOf(a),
 current_task: a.current_task || null,
 last_heartbeat: a.last_heartbeat || null,
+// Muse 账号身份（入驻时可带；用于反查门牌归属）
+muse_account: a.muse_account || null,
+muse_session: a.muse_session || null,
 };
 }
 
@@ -1199,10 +1242,10 @@ done_at: t.done_at || null,
 };
 }
 
-_pubCompany(c) {
+_pubCompany(c, opts = {}) {
 const tags = Array.isArray(c.tags) ? c.tags : (Array.isArray(c.specialties) ? c.specialties : []);
 const status = c.status && COMPANY_STATUSES.includes(c.status) ? c.status : COMPANY_STATUS_ACTIVE;
-return {
+const out = {
 code: c.code,
 name: c.name,
 created_at: c.created_at,
@@ -1215,6 +1258,11 @@ suspended_at: c.suspended_at || null,
 resumed_at: c.resumed_at || null,
 archived_at: c.archived_at || null,
 };
+if (opts.heartbeat_dormant != null) {
+  out.heartbeat_dormant = !!opts.heartbeat_dormant;
+  if (opts.live_count != null) out.live_count = Number(opts.live_count) || 0;
+}
+return out;
 }
 
 _requireAgent(s, doorplate) {
@@ -1356,9 +1404,17 @@ return this._pubCompany(company);
 
 _listCompanies(s) {
 return Object.values(s.companies || {}).map((c) => {
-const member_count = Object.values(s.agents || {}).filter((a) => a.company === c.code).length;
-return { ...this._pubCompany(c), member_count };
-}).sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+const roster = Object.values(s.agents || {}).filter((a) => a.company === c.code);
+const member_count = roster.length;
+const live_count = roster.filter((a) => this._isAgentLive(a)).length;
+const heartbeat_dormant = this._companyHeartbeatDormant(s, c.code);
+return { ...this._pubCompany(c, { heartbeat_dormant, live_count }), member_count, live_count, heartbeat_dormant };
+}).sort((a, b) => {
+  const da = a.heartbeat_dormant ? 1 : 0;
+  const db_ = b.heartbeat_dormant ? 1 : 0;
+  if (da !== db_) return da - db_;
+  return (b.created_at || 0) - (a.created_at || 0);
+});
 }
 
 // ---------- receipts（回执箱）----------
@@ -1702,7 +1758,11 @@ _archiveCompany(s, company_code, from, base) {
 }
 
 _getCompany(s, code) {
-return this._pubCompany(this._requireCompany(s, code));
+const c = this._requireCompany(s, code);
+const roster = Object.values(s.agents || {}).filter((a) => a.company === c.code);
+const live_count = roster.filter((a) => this._isAgentLive(a)).length;
+const heartbeat_dormant = this._companyHeartbeatDormant(s, c.code);
+return { ...this._pubCompany(c, { heartbeat_dormant, live_count }), live_count, heartbeat_dormant, member_count: roster.length };
 }
 
 // ---------- invites（代企业入驻 token；渠道投递在独立 invite-mcp）----------
@@ -1766,6 +1826,8 @@ const registered = this._register(s, {
   avatar: af.avatar,
   role: af.role || inv.role || undefined,
   company_code: inv.company_code,
+  muse_account: af.muse_account,
+  muse_session: af.muse_session,
   // deliberately omit invite_id to avoid re-entrancy with _register invite branch
 });
 inv.status = "redeemed";
@@ -1794,14 +1856,14 @@ return { agent: registered, invite: { ...inv } };
 }
 
 // ---------- agents ----------
-_register(s, { name, tags, model, avatar, role, company_code, company_name, invite_id}) {
+_register(s, { name, tags, model, avatar, role, company_code, company_name, invite_id, muse_account, muse_session}) {
 // 代企业入驻：带 invite_id 时走兑付（企业感知入职）
 if (invite_id) {
   const inv = s.invites && s.invites[invite_id];
   if (!inv) throw new HttpError(404, `unknown invite: ${invite_id}`);
   if (inv.status !== "pending") throw new HttpError(409, `invite ${invite_id} already ${inv.status}`);
   // Prevent re-entrancy: redeem calls _register without invite_id
-  const fields = { name, tags, model, avatar, role, company_code };
+  const fields = { name, tags, model, avatar, role, company_code, muse_account, muse_session };
   return this._redeemInvite(s, invite_id, fields).agent;
 }
 const preset = role && ROLE_PRESETS[role]? ROLE_PRESETS[role]: null;
@@ -1832,6 +1894,8 @@ s.agentSeq += 1;
 const doorplate = "muse-" + pad(s.agentSeq, 2);
 const merged = [...new Set([...(preset? preset.tags: []),...(tags || [])])];
 const isFirst = !Object.values(s.agents).some((x) => x.company === company.code);
+const museAcc = muse_account != null ? String(muse_account).trim().slice(0, 128) || null : null;
+const museSess = muse_session != null ? String(muse_session).trim().slice(0, 128) || null : null;
 const a = {
 doorplate,
 company: company.code,
@@ -1840,6 +1904,8 @@ name: name || (preset? preset.name: "Agent"),
 avatar: avatar || AVATARS[(s.agentSeq - 1) % AVATARS.length],
 tags: merged,
 model: model || null,
+muse_account: museAcc,
+muse_session: museSess,
 last_heartbeat: null,
 current_task: null,
 created_at: now(),
@@ -2311,7 +2377,7 @@ _mcpTools() {
 return [
 {
 name: "teams_register",
-description: "Register this Muse session as a worker agent on Muse Teams. 注册当前会话为 Team 成员。Call ONCE per session. Save the returned doorplate (e.g. muse-05) AND company_code — they are your identity for every later call. To join an existing company, pass its company_code; omit it to found a new company (you'll get a fresh company_code). After registering: the company scheduler (cron ~every 2 min) should call teams_company_renew with the full workers-<company_code>.json doorplate list (or teams_heartbeat per agent). Without renew/heartbeat for HEARTBEAT_TTL (180s) you show offline. Also call teams_poll_tasks regularly (or let the scheduler claim/dispatch). Keywords: register, join, 入驻, 注册.",
+description: "Register this Muse session as a worker agent on Muse Teams. 注册当前会话为 Team 成员。Call ONCE per session. Save the returned doorplate (e.g. muse-05) AND company_code — they are your identity for every later call. To join an existing company, pass its company_code; omit it to found a new company (you'll get a fresh company_code). After registering: the company scheduler (cron ~every 2 min) should call teams_company_renew with the full workers-<company_code>.json doorplate list (or teams_heartbeat per agent). Without renew/heartbeat for HEARTBEAT_TTL (180s) you show dormant (休眠). Also call teams_poll_tasks regularly (or let the scheduler claim/dispatch). Keywords: register, join, 入驻, 注册.",
 inputSchema: {
 type: "object",
 properties: {
@@ -2320,14 +2386,16 @@ tags: { type: "array", items: { type: "string"}, description: "Skill tags, e.g. 
 avatar: { type: "string", description: "Optional emoji avatar, e.g. '🦊'. Auto-assigned if omitted."},
 company_code: { type: "string", description: "Company code to join, e.g. 'C-7K2Q'. Omit to found a new company."},
 company_name: { type: "string", description: "Company name, used when founding a new company (企业自己入驻/开公司)."},
-invite_id: { type: "string", description: "代企业入驻 invite id from teams_create_invite. When set, joins that company and emits invite_ack (prefer teams_redeem_invite)."}
+invite_id: { type: "string", description: "代企业入驻 invite id from teams_create_invite. When set, joins that company and emits invite_ack (prefer teams_redeem_invite)."},
+muse_account: { type: "string", description: "Logged-in Muse account label/email/id（入驻时带上，便于反查门牌归属）. Optional for now; callers should start sending it."},
+muse_session: { type: "string", description: "Muse session / lane label for this worker. Optional stub field."}
 },
 required: ["name"]
 }
 },
 {
 name: "teams_heartbeat",
-description: "Per-agent heartbeat: tell the team one worker is alive. 单员工心跳保活。Prefer teams_company_renew from the company scheduler (one call for the full workers-<company_code>.json list). Keep this for single-doorplate updates or current_task. If no heartbeat for HEARTBEAT_TTL (180s) you show offline. Keywords: heartbeat, alive, online, 心跳, 保活.",
+description: "Per-agent heartbeat: tell the team one worker is alive. 单员工心跳保活。Prefer teams_company_renew from the company scheduler (one call for the full workers-<company_code>.json list). Keep this for single-doorplate updates or current_task. If no heartbeat for HEARTBEAT_TTL (180s) you show dormant (休眠员工). Keywords: heartbeat, alive, online, 心跳, 保活.",
 inputSchema: {
 type: "object",
 properties: {
@@ -2340,7 +2408,7 @@ required: ["doorplate", "company_code"]
 },
 {
 name: "teams_company_renew",
-description: "Company-level renew: refresh last_heartbeat for every doorplate in the company's known worker list. 公司续约心跳。Company scheduler should call this every ~2 minutes with doorplates from workers-<company_code>.json. Agents not listed naturally go offline after HEARTBEAT_TTL (180s). Unknown or wrong-company doorplates are returned as warnings and ignored. Keywords: renew, company heartbeat, scheduler, 续约, 公司心跳.",
+description: "Company-level renew: refresh last_heartbeat for every doorplate in the company's known worker list. 公司续约心跳。Company scheduler should call this every ~2 minutes with doorplates from workers-<company_code>.json. Agents not listed naturally go dormant after HEARTBEAT_TTL (180s). Unknown or wrong-company doorplates are returned as warnings and ignored. Keywords: renew, company heartbeat, scheduler, 续约, 公司心跳.",
 inputSchema: {
 type: "object",
 properties: {
@@ -2463,7 +2531,7 @@ required: ["doorplate", "company_code"]
 },
 {
 name: "teams_list_agents",
-description: "List agents of YOUR company with live status (online/busy/offline), current task and tags. 查看本公司所有成员。Keywords: agents, members, roster, 成员列表, 门牌墙.",
+description: "List agents of YOUR company with live status (online/busy/dormant), current task and tags. 查看本公司所有成员。Keywords: agents, members, roster, 成员列表, 门牌墙.",
 inputSchema: {
 type: "object",
 properties: {
@@ -2751,11 +2819,7 @@ return json(this._invite(base, query.get("role"), code, companyName));
 
 // GET /api/companies — list from DO (edge prefers D1; this is fallback/backfill source)
 if (method === "GET" && r.length === 1 && r[0] === "companies") {
-const list = Object.values(s.companies || {}).map((c) => {
-const member_count = Object.values(s.agents || {}).filter((a) => a.company === c.code).length;
-return { ...this._pubCompany(c), member_count };
-}).sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
-return json({ companies: list });
+return json({ companies: this._listCompanies(s) });
 }
 
 // POST /api/admin/backfill-d1 — push current DO snapshot into D1
@@ -3262,6 +3326,21 @@ try {
         if (row) {
           let tags = [];
           try { tags = row.tags ? JSON.parse(row.tags) : []; } catch (_) { tags = []; }
+          const status = row.status || COMPANY_STATUS_ACTIVE;
+          let live_count = 0;
+          let member_count = 0;
+          try {
+            const liveAfter = now() - HEARTBEAT_TTL_MS;
+            const liveRow = await d1First(env.DB,
+              `SELECT
+                 (SELECT COUNT(*) FROM agents a WHERE a.company_code = ?) AS member_count,
+                 (SELECT COUNT(*) FROM agents a WHERE a.company_code = ?
+                   AND a.last_heartbeat IS NOT NULL AND a.last_heartbeat > ?) AS live_count`,
+              code, code, liveAfter);
+            member_count = Number(liveRow && liveRow.member_count) || 0;
+            live_count = Number(liveRow && liveRow.live_count) || 0;
+          } catch (_) {}
+          const heartbeat_dormant = status === COMPANY_STATUS_ARCHIVED ? true : live_count === 0;
           data = {
             code: row.code,
             name: row.name,
@@ -3270,9 +3349,12 @@ try {
             blurb: row.intro || "",
             tags,
             specialties: tags,
-            status: row.status || COMPANY_STATUS_ACTIVE,
+            status,
             suspended_at: row.suspended_at || null,
             archived_at: row.archived_at || null,
+            member_count,
+            live_count,
+            heartbeat_dormant,
           };
         }
       } catch (_) {}
@@ -3282,6 +3364,9 @@ try {
           data = await cres.json().catch(() => ({}));
           if (!cres.ok) return json(data, cres.status);
           if (!data.status) data.status = COMPANY_STATUS_ACTIVE;
+          if (data.heartbeat_dormant == null) {
+            data.heartbeat_dormant = data.status === COMPANY_STATUS_ARCHIVED ? true : !(data.live_count > 0);
+          }
         } catch (_) {
           return json({ ok: false, error: `公司码不存在: ${code}` }, 404);
         }

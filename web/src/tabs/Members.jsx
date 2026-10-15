@@ -3,13 +3,13 @@ import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import MonsterAvatar from '../components/MonsterAvatar.jsx';
 import Pager from '../components/Pager.jsx';
 import { relTime, api, getCompany, setCompany as persistCompany } from '../api.js';
-import { agentStatus } from '../components/Creature.jsx';
+import { agentStatus, isAgentDormant } from '../components/Creature.jsx';
 
 const ZONE_PAGE = 6;
 
 function statusLabel(st) {
   if (st === 'busy') return '🏃 干活中';
-  if (st === 'offline') return '💤 离线';
+  if (isAgentDormant(st)) return '💤 休眠';
   return '🛋️ 在线';
 }
 
@@ -43,7 +43,7 @@ function EmployeeCard({ agent, leadDoorplate, companyCode, onDeleted }) {
   };
 
   return (
-    <div className={`emp-card${st === 'offline' ? ' offline' : ''}`}>
+    <div className={`emp-card${isAgentDormant(st) ? ' offline' : ''}`}>
       <MonsterAvatar doorplate={agent.doorplate} size={36} />
       <div className="emp-meta">
         <div className="emp-name">{agent.avatar || ''} {agent.name || agent.doorplate}</div>
@@ -78,13 +78,13 @@ function CompanyZone({
 }) {
   const onlineN = agents.filter((a) => agentStatus(a) === 'online').length;
   const busyN = agents.filter((a) => agentStatus(a) === 'busy').length;
-  const offlineN = agents.filter((a) => agentStatus(a) === 'offline').length;
+  const dormantN = agents.filter((a) => isAgentDormant(a)).length;
   const leadDoorplate = (agents.find((a) => a.role === 'lead') || agents[0] || {}).doorplate || '';
   const active = company.code === currentCode;
   const sorted = agents.slice().sort((a, b) => {
     const sa = agentStatus(a);
     const sb = agentStatus(b);
-    const rank = { busy: 0, online: 1, offline: 2 };
+    const rank = { busy: 0, online: 1, dormant: 2, offline: 2 };
     return (rank[sa] ?? 9) - (rank[sb] ?? 9)
       || String(a.doorplate).localeCompare(String(b.doorplate));
   });
@@ -102,7 +102,7 @@ function CompanyZone({
               <span className="co-code-badge">{company.code}</span>
               {' · '}🐾 <b>{agents.length || company.member_count || 0}</b>
               {agents.length > 0 && (
-                <> · 在线 {onlineN} · 忙碌 {busyN} · 离线 {offlineN}</>
+                <> · 在线 {onlineN} · 忙碌 {busyN} · 休眠 {dormantN}</>
               )}
               {active ? ' · 当前' : ''}
             </div>

@@ -1,6 +1,6 @@
 // 客厅场景 —— 毛怪座位花名册 · 纸飞机任务板 · 产物架
 import React, { useRef, useEffect, useState, useCallback } from 'react';
-import Creature, { agentStatus } from '../components/Creature.jsx';
+import Creature, { agentStatus, isAgentDormant } from '../components/Creature.jsx';
 import MonsterAvatar, { MonsterMini } from '../components/MonsterAvatar.jsx';
 import { api } from '../api.js';
 import { welcomeAgent, flyInPlane, claimPounce, claimShake, deliverCelebration, broadcastCheer } from '../anim.js';
@@ -49,9 +49,11 @@ export default function LivingRoom({
   const coCode = (company && company.code) || '';
 
   const working = agents.filter((a) => agentStatus(a) === 'busy');
-  const waiting = agents.filter((a) => agentStatus(a) !== 'busy'); // online + offline
-  const onlineN = agents.filter((a) => agentStatus(a) === 'online').length;
+  const waiting = agents.filter((a) => agentStatus(a) === 'online'); // 仅真正在线等候
+  const dormant = agents.filter((a) => isAgentDormant(a));
+  const onlineN = waiting.length;
   const busyN = working.length;
+  const dormantN = dormant.length;
   /** Pad each row so empty seat outlines always show (obvious grid even with 1–2 agents). */
   const ROSTER_MIN_SEATS = 6;
   const padSeats = (n) => Math.max(ROSTER_MIN_SEATS - n, n === 0 ? ROSTER_MIN_SEATS : 0);
@@ -115,7 +117,7 @@ export default function LivingRoom({
   /* ---- 抢单（本窝在线员工；跨公司 claim 由后端放开） ---- */
   const grabClick = (e, taskId) => {
     e.stopPropagation();
-    const avail = agents.filter((a) => agentStatus(a) !== 'offline');
+    const avail = agents.filter((a) => !isAgentDormant(a));
     const list = avail.length ? avail : agents;
     if (!list.length) {
       onToast('本窝还没人，先去「邀请小伙伴」', true);
@@ -207,6 +209,7 @@ export default function LivingRoom({
           <span className="lr-den-chip">毛怪 <b>{agents.length}</b></span>
           <span className="lr-den-chip">在线 <b>{onlineN}</b></span>
           <span className="lr-den-chip">干活 <b>{busyN}</b></span>
+          <span className="lr-den-chip">休眠 <b>{dormantN}</b></span>
           <span className={`lr-den-chip${reviewTasks.length ? ' hot' : ''}`}>待收 <b>{reviewTasks.length}</b></span>
           <span className="lr-den-chip">纸飞机 <b>{pending.length}</b></span>
           <span className="lr-den-chip">产物 <b>{artCount}</b></span>
@@ -234,7 +237,7 @@ export default function LivingRoom({
           <div className="lr-roster-legend">
             <span className="lr-leg lr-leg-busy">干活</span>
             <span className="lr-leg lr-leg-online">在线</span>
-            <span className="lr-leg lr-leg-off">离线</span>
+            <span className="lr-leg lr-leg-off">休眠</span>
           </div>
         </header>
 
@@ -291,6 +294,36 @@ export default function LivingRoom({
             ))}
             {emptySeats(padSeats(waiting.length)).map((i) => (
               <div key={`wa-${i}`} className="lr-roster-seat lr-roster-empty" aria-hidden>
+                <div className="lr-roster-pad">+</div>
+                <div className="lr-roster-pad-label">空位</div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="lr-roster-row" aria-label="休眠员工">
+          <div className="lr-roster-row-label">
+            <span className="lr-roster-row-ico" aria-hidden>💤</span>
+            <span>休眠</span>
+            <b>{dormant.length}</b>
+            <em className="lr-roster-row-hint">无心跳 · 休眠员工</em>
+          </div>
+          <div className="lr-roster-grid">
+            {dormant.map((a) => (
+              <div key={a.doorplate} className="lr-roster-seat">
+                <Creature
+                  ref={(el) => { if (el) creatureRefs.current[a.doorplate] = el; }}
+                  agent={a}
+                  leftPct={0}
+                  topPct={0}
+                  size="xs"
+                  onSendMsg={onSendMsg}
+                  onOpenMailbox={onOpenMailbox}
+                />
+              </div>
+            ))}
+            {emptySeats(padSeats(dormant.length)).map((i) => (
+              <div key={`dm-${i}`} className="lr-roster-seat lr-roster-empty" aria-hidden>
                 <div className="lr-roster-pad">+</div>
                 <div className="lr-roster-pad-label">空位</div>
               </div>

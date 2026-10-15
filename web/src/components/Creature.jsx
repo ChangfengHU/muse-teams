@@ -1,16 +1,23 @@
 // 毛怪元素 —— 状态类驱动 CSS 动画
-// idle → breathe/lookaround, working → workbob/pawtap, offline → curl/zzz
+// idle → breathe/lookaround, working → workbob/pawtap, dormant(休眠) → curl/zzz (CSS class still .offline)
 import React, { useState, useRef, useEffect, forwardRef } from 'react';
 import MonsterAvatar from './MonsterAvatar.jsx';
 import { relTime, heartbeatLabel } from '../api.js';
 
 // 心跳 → 状态推导（与后端 HEARTBEAT_TTL 180s 一致）
+// dormant = 休眠员工；API 也可能仍回 offline（兼容）
 export const HEARTBEAT_TTL_MS = 180_000;
 export function agentStatus(a) {
-  if (!a) return 'offline';
+  if (!a) return 'dormant';
+  if (a.status === 'online' || a.status === 'busy' || a.status === 'dormant') return a.status;
+  if (a.status === 'offline') return 'dormant';
   const last = a.last_heartbeat || 0;
-  if (!last || Date.now() - last > HEARTBEAT_TTL_MS) return 'offline';
+  if (!last || Date.now() - last > HEARTBEAT_TTL_MS) return 'dormant';
   return a.current_task ? 'busy' : 'online';
+}
+export function isAgentDormant(stOrAgent) {
+  const st = typeof stOrAgent === 'string' ? stOrAgent : agentStatus(stOrAgent);
+  return st === 'dormant' || st === 'offline';
 }
 
 const Creature = forwardRef(function Creature(
@@ -20,8 +27,9 @@ const Creature = forwardRef(function Creature(
   const [bubbleOpen, setBubbleOpen] = useState(false);
   const rootRef = useRef(null);
   const st = agentStatus(agent);
-  const cls = st === 'offline' ? 'offline' : st === 'busy' ? 'working' : 'idle';
-  const stTxt = st === 'busy' ? '🏃 干活中' : st === 'offline' ? '💤 离线' : '🛋️ 等活儿';
+  const dormant = isAgentDormant(st);
+  const cls = dormant ? 'offline' : st === 'busy' ? 'working' : 'idle';
+  const stTxt = st === 'busy' ? '🏃 干活中' : dormant ? '💤 休眠' : '🛋️ 等活儿';
   const sizeCls = size === 'lg' ? ' lg' : size === 'xs' ? ' xs' : size === 'sm' ? ' sm' : '';
   const embedCls = embedded || (leftPct === 0 && topPct === 0) ? ' embedded' : '';
   const avatarPx = size === 'lg' ? 152 : size === 'xs' ? 52 : size === 'sm' ? 64 : 104;
@@ -107,7 +115,7 @@ function Bubble({ open, agent, stTxt, onSendMsg, onOpenMailbox, onClose }) {
       </div>
       <div className="cb-row">🏷️ 标签：<b>{(agent.tags || []).join(' · ') || '无'}</b></div>
       <div className="cb-row">📌 当前任务：<b>{agent.current_task || '无'}</b></div>
-      <div className="cb-row">💓 上次心跳：<b>{heartbeatLabel(agent.last_heartbeat)}</b>{st === 'offline' ? ' · 已离线（>180s）' : ''}</div>
+      <div className="cb-row">💓 上次心跳：<b>{heartbeatLabel(agent.last_heartbeat)}</b>{isAgentDormant(st) ? ' · 休眠员工（>180s 无心跳）' : ''}</div>
       <div className="breply">
         <input
           value={msg}

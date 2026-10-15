@@ -41,10 +41,12 @@ function CompanyCard({ item, active, liveMembers, onSelect }) {
         <div className="co-card-title">
           <div className="co-card-name">{item.name || item.code}</div>
           <span className="co-code-badge">{item.code}</span>
-          {item.status && item.status !== 'active' ? (
-            <span className="co-code-badge" style={{ marginLeft: 6 }}>
-              {item.status === 'suspended' ? '休眠' : item.status === 'archived' ? '已注销' : item.status}
-            </span>
+          {item.status === 'archived' ? (
+            <span className="co-code-badge" style={{ marginLeft: 6 }}>已注销</span>
+          ) : item.status === 'suspended' ? (
+            <span className="co-code-badge" style={{ marginLeft: 6 }}>休眠（手动）</span>
+          ) : item.heartbeat_dormant ? (
+            <span className="co-code-badge" style={{ marginLeft: 6 }}>休眠公司</span>
           ) : null}
         </div>
         {active && <span className="co-card-pill">✨ 当前</span>}
@@ -102,6 +104,7 @@ export default function Companies({ company, agents, onSelectCompany, onToast })
   const [createPulse, setCreatePulse] = useState(false);
   const [lifeBusy, setLifeBusy] = useState(false);
   const [lifePrompt, setLifePrompt] = useState('');
+  const [searchQ, setSearchQ] = useState('');
   const currentCode = (company && company.code) || getCompany() || '';
 
   const toast = useCallback((msg, isErr) => {
@@ -116,15 +119,17 @@ export default function Companies({ company, agents, onSelectCompany, onToast })
       const companies = (res && res.companies) || [];
       const selectedCode = getCompany() || '';
       companies.sort((a, b) => {
-        const na = a.member_count || 0;
-        const nb = b.member_count || 0;
-        if (nb !== na) return nb - na;
+        // 有心跳的公司永远排前面；休眠公司默认隐藏，仅搜索可见
+        const da = a.heartbeat_dormant ? 1 : 0;
+        const db_ = b.heartbeat_dormant ? 1 : 0;
+        if (da !== db_) return da - db_;
         const aSel = a.code === selectedCode ? 1 : 0;
         const bSel = b.code === selectedCode ? 1 : 0;
         if (bSel !== aSel) return bSel - aSel;
-        const ta = a.created_at || 0;
-        const tb = b.created_at || 0;
-        return tb - ta;
+        const na = a.member_count || 0;
+        const nb = b.member_count || 0;
+        if (nb !== na) return nb - na;
+        return (b.created_at || 0) - (a.created_at || 0);
       });
       setList(companies);
       const cached = listSavedCompanies();
@@ -152,18 +157,38 @@ export default function Companies({ company, agents, onSelectCompany, onToast })
     loadCompanies(false);
   }, [loadCompanies]);
 
+  // 默认只展示有心跳的公司；搜索时才露出休眠公司（按名/码匹配）
+  const visibleList = useMemo(() => {
+    const q = String(searchQ || '').trim().toLowerCase();
+    return list.filter((c) => {
+      if (q) {
+        const name = String(c.name || '').toLowerCase();
+        const code = String(c.code || '').toLowerCase();
+        return name.includes(q) || code.includes(q);
+      }
+      // 当前已进入的公司即使休眠也保留，避免丢上下文
+      if (currentCode && c.code === currentCode) return true;
+      return !c.heartbeat_dormant;
+    });
+  }, [list, searchQ, currentCode]);
+
+  const dormantHiddenN = useMemo(() => {
+    if (String(searchQ || '').trim()) return 0;
+    return list.filter((c) => c.heartbeat_dormant && c.code !== currentCode).length;
+  }, [list, searchQ, currentCode]);
+
   // keep page in range when list shrinks
-  const totalPages = Math.max(1, Math.ceil(list.length / PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil(visibleList.length / PAGE_SIZE));
   useEffect(() => {
     if (page > totalPages) setPage(totalPages);
   }, [page, totalPages]);
 
   // jump to page containing selected company
   useEffect(() => {
-    if (!currentCode || !list.length) return;
-    const idx = list.findIndex((c) => c.code === currentCode);
+    if (!currentCode || !visibleList.length) return;
+    const idx = visibleList.findIndex((c) => c.code === currentCode);
     if (idx >= 0) setPage(Math.floor(idx / PAGE_SIZE) + 1);
-  }, [currentCode, list]);
+  }, [currentCode, visibleList]);
 
   useEffect(() => {
     if (!currentCode) {
@@ -205,8 +230,8 @@ export default function Companies({ company, agents, onSelectCompany, onToast })
 
   const pageItems = useMemo(() => {
     const start = (page - 1) * PAGE_SIZE;
-    return list.slice(start, start + PAGE_SIZE);
-  }, [list, page]);
+    return visibleList.slice(start, start + PAGE_SIZE);
+  }, [visibleList, page]);
 
   const copy = async (text, okMsg) => {
     if (!text) { toast('没有可复制的内容', true); return; }
@@ -440,8 +465,22 @@ export default function Companies({ company, agents, onSelectCompany, onToast })
         >
           {listLoading ? '刷新中…' : '刷新'}
         </button>
+        <input
+          type="search"
+          className="co-join-input"
+          style={{ maxWidth: 220, marginLeft: 4 }}
+          placeholder="搜索公司名 / 公司码…"
+          value={searchQ}
+          onChange={(e) => { setSearchQ(e.target.value); setPage(1); }}
+          aria-label="搜索公司"
+        />
         {!!list.length && (
-          <span className="co-toolbar-meta">共 {list.length} 家 · 第 {page}/{totalPages} 页</span>
+          <span className="co-toolbar-meta">
+            显示 {visibleList.length}/{list.length} 家
+            {dormantHiddenN ? ` · 已隐藏 ${dormantHiddenN} 家休眠` : ''}
+            {String(searchQ || '').trim() ? ' · 含搜索到的休眠' : ' · 默认仅有心跳'}
+            {' · '}第 {page}/{totalPages} 页
+          </span>
         )}
       </div>
 
@@ -503,6 +542,13 @@ export default function Companies({ company, agents, onSelectCompany, onToast })
 
       {!!list.length && (
         <>
+          {!pageItems.length && (
+            <div className="empty-hint" style={{ marginBottom: 12 }}>
+              {String(searchQ || '').trim()
+                ? '没有匹配的公司，换个名字或公司码试试'
+                : `当前没有有心跳的公司（已隐藏 ${dormantHiddenN} 家休眠）。在上方搜索公司名/公司码可找到休眠公司。`}
+            </div>
+          )}
           <div className="co-grid">
             {pageItems.map((item) => (
               <CompanyCard
@@ -599,7 +645,8 @@ export default function Companies({ company, agents, onSelectCompany, onToast })
               <div className="co-invite-title">公司生命周期</div>
               <div className="co-invite-sub">
                 状态：{(selected.status || (company && company.status) || 'active')}
-                {' · '}休眠可重开；注销为终端态（走 prompt 渠道擦除 Muse）
+                {selected.heartbeat_dormant ? ' · 休眠公司（无员工心跳）' : ' · 有心跳'}
+                {' · '}手动休眠可重开；注销为终端态（走 prompt 渠道擦除 Muse）
               </div>
             </div>
             <div className="co-invite-actions">
