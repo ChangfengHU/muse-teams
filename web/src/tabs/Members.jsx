@@ -184,6 +184,18 @@ export default function Members({ company, onSelectCompany, onToast }) {
           }
         })
       );
+      const selectedCode = getCompany() || '';
+      settled.sort((a, b) => {
+        const na = (a.agents && a.agents.length) || a.member_count || 0;
+        const nb = (b.agents && b.agents.length) || b.member_count || 0;
+        if (nb !== na) return nb - na;
+        const aSel = a.code === selectedCode ? 1 : 0;
+        const bSel = b.code === selectedCode ? 1 : 0;
+        if (bSel !== aSel) return bSel - aSel;
+        const ta = a.created_at || 0;
+        const tb = b.created_at || 0;
+        return tb - ta;
+      });
       setZones(settled);
     } catch (e) {
       const msg = e && e.message ? e.message : String(e);

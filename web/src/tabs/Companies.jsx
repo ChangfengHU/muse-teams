@@ -81,6 +81,18 @@ export default function Companies({ company, agents, onSelectCompany, onToast })
     try {
       const res = await api.listCompanies();
       const companies = (res && res.companies) || [];
+      const selectedCode = getCompany() || '';
+      companies.sort((a, b) => {
+        const na = a.member_count || 0;
+        const nb = b.member_count || 0;
+        if (nb !== na) return nb - na;
+        const aSel = a.code === selectedCode ? 1 : 0;
+        const bSel = b.code === selectedCode ? 1 : 0;
+        if (bSel !== aSel) return bSel - aSel;
+        const ta = a.created_at || 0;
+        const tb = b.created_at || 0;
+        return tb - ta;
+      });
       setList(companies);
       const cached = listSavedCompanies();
       for (const c of companies) {

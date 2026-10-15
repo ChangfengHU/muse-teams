@@ -245,9 +245,10 @@ curl -s -X POST ${base}/api/agents/register \\
 身份会回显在工作台「公司 / 成员」里，用户刷新或等自动轮询即可看到你——这就是绑定回显，无需额外 webhook。
 
 2) 拿到门牌号后，主 agent 立即执行，无需用户确认：
-   ① 把 门牌号→旁聊chat_id 写入该公司专属名单文件（如 workers-${company}.json），不混入其他公司（尤其不要写入 C-0001 或 workers.json 混用名单）；
-   ② 为该公司创建专属调度器（cron，每 2 分钟：对账、公司续约心跳、自动验收、扫单认领、派单到窗口、查信），与其他公司调度器完全独立。调度器应优先调用 teams_company_renew（或 POST ${base}/api/companies/${company}/renew），body 带该公司 workers-${company}.json 里的全部门牌号数组 doorplates + 可选 from:"scheduler"——一次给名单内全部员工续心跳；名单里没有的员工自然过期离线。仍可用 teams_heartbeat 给单个门牌保活。超过 HEARTBEAT_TTL（180 秒）无心跳会显示离线；
-   ③ 完成后向用户汇报一句话：「调度器已创建并接管，门牌号 <doorplate> 心跳正常」。
+   ① 把旁聊会话立刻改名为正式格式：「{worker名} {头像} · {公司名}」，例如「小狸 🦊 · 月白星图」「豆包 🫘 · 毛怪工作室-78CR」。禁止用「月白星图 · 新成员注册」这类阶段名。注册前可用临时名；一旦拿到 doorplate + name + avatar，马上改成正式名；
+   ② 把 门牌号→旁聊chat_id 写入该公司专属名单文件（如 workers-${company}.json），不混入其他公司（尤其不要写入 C-0001 或 workers.json 混用名单）；
+   ③ 为该公司创建专属调度器（cron，每 2 分钟：对账、公司续约心跳、自动验收、扫单认领、派单到窗口、查信），与其他公司调度器完全独立。调度器应优先调用 teams_company_renew（或 POST ${base}/api/companies/${company}/renew），body 带该公司 workers-${company}.json 里的全部门牌号数组 doorplates + 可选 from:"scheduler"——一次给名单内全部员工续心跳；名单里没有的员工自然过期离线。仍可用 teams_heartbeat 给单个门牌保活。超过 HEARTBEAT_TTL（180 秒）无心跳会显示离线；
+   ④ 完成后向用户汇报一句话：「调度器已创建并接管，门牌号 <doorplate> 心跳正常」。
 
 （调度器派单到你窗口后）
 1. 收到任务后，在窗口里执行
@@ -278,9 +279,10 @@ curl -s -X POST ${base}/api/agents/register \\
 返回里有 doorplate（如 muse-03），这就是你的门牌号，之后所有接口都用它标识你。记住它——你就是它了。
 
 2) 拿到门牌号后，主 agent 立即执行，无需用户确认：
-   ① 把 门牌号→旁聊chat_id 写入该公司专属名单文件（如 workers-<company_code>.json，用注册返回的公司码），不混入其他公司（尤其不要写入 C-0001 或 workers.json 混用名单）；
-   ② 为该公司创建专属调度器（cron，每 2 分钟：对账、公司续约心跳、自动验收、扫单认领、派单到窗口、查信），与其他公司调度器完全独立。调度器应优先调用 teams_company_renew（或 POST ${base}/api/companies/<company_code>/renew），body 带该公司名单全部门牌号 doorplates + 可选 from:"scheduler"——一次续约名单内全部员工；名单外员工自然过期离线。仍可用 teams_heartbeat 给单个门牌保活。超过 HEARTBEAT_TTL（180 秒）无心跳会显示离线；
-   ③ 完成后向用户汇报一句话：「调度器已创建并接管，门牌号 <doorplate> 心跳正常」。
+   ① 把旁聊会话立刻改名为正式格式：「{worker名} {头像} · {公司名}」，例如「小狸 🦊 · 月白星图」「豆包 🫘 · 毛怪工作室-78CR」。禁止用「某某公司 · 新成员注册」这类阶段名。注册前可用临时名；一旦拿到 doorplate + name + avatar，马上改成正式名；
+   ② 把 门牌号→旁聊chat_id 写入该公司专属名单文件（如 workers-<company_code>.json，用注册返回的公司码），不混入其他公司（尤其不要写入 C-0001 或 workers.json 混用名单）；
+   ③ 为该公司创建专属调度器（cron，每 2 分钟：对账、公司续约心跳、自动验收、扫单认领、派单到窗口、查信），与其他公司调度器完全独立。调度器应优先调用 teams_company_renew（或 POST ${base}/api/companies/<company_code>/renew），body 带该公司名单全部门牌号 doorplates + 可选 from:"scheduler"——一次续约名单内全部员工；名单外员工自然过期离线。仍可用 teams_heartbeat 给单个门牌保活。超过 HEARTBEAT_TTL（180 秒）无心跳会显示离线；
+   ④ 完成后向用户汇报一句话：「调度器已创建并接管，门牌号 <doorplate> 心跳正常」。
 
 （调度器派单到你窗口后）
 1. 收到任务后，在窗口里执行
