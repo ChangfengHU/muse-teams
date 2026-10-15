@@ -159,16 +159,17 @@ invite: (role) => {
 health: () => request('/api/health'),
 
 // 写入（全部带公司码）
-createTask: ({ title, desc, priority, task_type, prompts, acceptance }) =>
+createTask: ({ title, desc, priority, task_type, prompts, acceptance, assign_to }) =>
   request('/api/tasks', 'POST', {
     title, desc, priority,
     ...(task_type ? { task_type } : {}),
     ...(prompts != null ? { prompts } : {}),
     ...(acceptance != null ? { acceptance } : {}),
+    ...(assign_to ? { assign_to } : {}),
     company_code: needCompany(),
   }),
-/** 手动发「视频生成」单：prompts 为数组或换行分隔字符串；title 可空由服务端按提示词生成 */
-createVideoGenTask: ({ title, prompts, priority, desc, acceptance }) =>
+/** 手动发「视频生成」单：prompts 为数组或换行分隔字符串；title 可空由服务端按提示词生成；assign_to 直派跳过广场 */
+createVideoGenTask: ({ title, prompts, priority, desc, acceptance, assign_to }) =>
   request('/api/tasks', 'POST', {
     ...(title && String(title).trim() ? { title: String(title).trim() } : {}),
     prompts,
@@ -176,6 +177,7 @@ createVideoGenTask: ({ title, prompts, priority, desc, acceptance }) =>
     task_type: 'video_gen',
     ...(desc != null ? { desc } : {}),
     ...(acceptance != null ? { acceptance } : {}),
+    ...(assign_to ? { assign_to } : {}),
     company_code: needCompany(),
   }),
 /** 抢单广场：pending/claimed 跨公司；status=review 须传 company（发单方），否则后端返回空 */

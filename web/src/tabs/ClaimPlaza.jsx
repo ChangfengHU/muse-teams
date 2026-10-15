@@ -42,17 +42,20 @@ function defaultVideoTitle(promptsText) {
   return `视频生成 · ${first} · ${n} 条`;
 }
 
-function CreateVideoModal({ show, onClose, onCreated, toast }) {
+function CreateVideoModal({ show, onClose, onCreated, toast, agents }) {
   const [title, setTitle] = useState('');
   const [prompts, setPrompts] = useState('');
   const [pri, setPri] = useState('P1');
+  const [assignTo, setAssignTo] = useState('');
   const [busy, setBusy] = useState(false);
+  const roster = Array.isArray(agents) ? agents : [];
 
   useEffect(() => {
     if (!show) return;
     setTitle(defaultVideoTitle(''));
     setPrompts('');
     setPri('P1');
+    setAssignTo('');
   }, [show]);
 
   if (!show) return null;
@@ -66,9 +69,14 @@ function CreateVideoModal({ show, onClose, onCreated, toast }) {
         title: autoTitle,
         prompts: prompts.trim(),
         priority: pri,
+        ...(assignTo ? { assign_to: assignTo } : {}),
       });
-      toast(`✈️ 视频生成单 ${task.id || ''} 已扔进广场`);
-      setTitle(''); setPrompts(''); setPri('P1');
+      if (assignTo) {
+        toast(`🎯 已直派给 ${assignTo} · ${task.id || ''}`);
+      } else {
+        toast(`✈️ 视频生成单 ${task.id || ''} 已扔进广场`);
+      }
+      setTitle(''); setPrompts(''); setPri('P1'); setAssignTo('');
       onClose();
       if (onCreated) onCreated(task);
     } catch (e) {
@@ -78,11 +86,15 @@ function CreateVideoModal({ show, onClose, onCreated, toast }) {
     }
   };
 
+  const assignLabel = assignTo
+    ? (roster.find((a) => a.doorplate === assignTo)?.name || assignTo)
+    : '';
+
   return (
     <div className="modal-bg show" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div className="modal mt-modal wide">
         <h2 className="serif">🎬 发视频生成单</h2>
-        <div className="msub">提示词交给抢单公司实现；对方交回每条视频的 JSON。剪辑单以后再发。</div>
+        <div className="msub">默认扔进广场抢单；选「指定员工」则直派（立刻 claimed，不进待抢池）。</div>
         <div className="field">
           <label>标题（可留空，按提示词自动生成）</label>
           <input
@@ -108,9 +120,22 @@ function CreateVideoModal({ show, onClose, onCreated, toast }) {
             <option value="P2">P2 低</option>
           </select>
         </div>
+        <div className="field">
+          <label>指定员工（可选 · 留空=扔进广场）</label>
+          <select value={assignTo} onChange={(e) => setAssignTo(e.target.value)}>
+            <option value="">不指定 · 扔进广场抢单</option>
+            {roster.map((a) => (
+              <option key={a.doorplate} value={a.doorplate}>
+                {(a.name || a.doorplate) + ' · ' + a.doorplate}
+              </option>
+            ))}
+          </select>
+        </div>
         <div className="row">
           <button type="button" className="btn btn-ghost" onClick={onClose}>取消</button>
-          <button type="button" className="btn" onClick={submit} disabled={busy}>扔进广场 ✈️</button>
+          <button type="button" className="btn" onClick={submit} disabled={busy}>
+            {assignTo ? `直派给 ${assignLabel} 🎯` : '扔进广场 ✈️'}
+          </button>
         </div>
       </div>
     </div>
@@ -196,6 +221,7 @@ function TaskDetail({ task, myCode, agents, onClose, onClaim, onSubmitResult, on
           {ST_META[stKey(task)]?.label || task.status}
           {' · '}
           <span className="tag">{task.task_type === 'video_gen' ? '视频生成' : (task.task_type || '任务')}</span>
+          {(task.assigned || task.dispatch_mode === 'assign') && <span className="tag">直派</span>}
         </div>
 
         <div className="plaza-detail-grid">
@@ -210,7 +236,7 @@ function TaskDetail({ task, myCode, agents, onClose, onClaim, onSubmitResult, on
             </button>
           </div>
           <div className="plaza-detail-card">
-            <div className="plaza-detail-label">抢走的公司 / 人</div>
+            <div className="plaza-detail-label">{(task.assigned || task.dispatch_mode === 'assign') ? '直派对象' : '抢走的公司 / 人'}</div>
             {task.owner ? (
               <button type="button" className="plaza-co-link" onClick={() => onGotoCompany(task.claim_company || task.company)}>
                 <MonsterAvatar doorplate={task.owner} size={28} />
@@ -463,6 +489,7 @@ export default function ClaimPlaza({ company, agents, onToast, onRefresh, onGoto
                       {urgent && <span className="tag urgent">紧急</span>}
                       {mine ? <span className="tag mine">本公司</span> : <span className="tag cross">外公司</span>}
                       <span className="tag">视频生成</span>
+                      {(t.assigned || t.dispatch_mode === 'assign') && <span className="tag">直派</span>}
                       {taken && <span className="tag">已抢 · {t.owner || '—'}</span>}
                     </div>
                   </div>
@@ -523,6 +550,7 @@ export default function ClaimPlaza({ company, agents, onToast, onRefresh, onGoto
         onClose={() => setShowCreate(false)}
         onCreated={() => { load(true); if (onRefresh) onRefresh(); }}
         toast={onToast}
+        agents={agents}
       />
       <ClaimPicker
         show={!!picker}

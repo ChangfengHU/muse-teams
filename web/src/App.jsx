@@ -314,7 +314,7 @@ export default function App() {
       </div>
 
       <PublishTaskModal show={showPublish} onClose={() => setShowPublish(false)}
-        onCreated={() => refresh(true)} toast={toast} />
+        onCreated={() => refresh(true)} toast={toast} agents={agents} />
       <InviteModal show={showInvite} onClose={() => setShowInvite(false)} toast={toast} />
       <ArtifactModal show={!!artView} onClose={() => setArtView(null)}
         task={artView && artView.task} artIndex={artView ? artView.idx : -1} />

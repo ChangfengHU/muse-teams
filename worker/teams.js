@@ -285,6 +285,7 @@ function buildTaskTraceFromPub(t) {
         company: t.claim_company || null,
       }
     : null;
+  const isAssigned = !!(t.assigned || t.dispatch_mode === "assign");
   const stages = [
     {
       stage: "created",
@@ -293,24 +294,28 @@ function buildTaskTraceFromPub(t) {
       actor: t.company
         ? { doorplate: null, name: company_name, company: t.company }
         : null,
-      payload: { task_type: t.task_type || "general", priority: t.priority || "P1" },
+      payload: { task_type: t.task_type || "general", priority: t.priority || "P1", assigned: isAssigned },
     },
     {
       stage: "plaza",
-      label: "进广场",
-      at: createdAt,
+      label: isAssigned ? "跳过广场" : "进广场",
+      at: isAssigned ? null : createdAt,
       actor: null,
-      payload: { open_to: "cross_company" },
+      payload: isAssigned
+        ? { skipped: true, reason: "direct_assign" }
+        : { open_to: "cross_company" },
     },
     {
       stage: "claimed",
-      label: "抢单",
+      label: isAssigned ? "直派" : "抢单",
       at: claimedAt,
       actor: ownerActor,
       payload: claimedAt
         ? {
             claim_company: t.claim_company || null,
             cross_company: !!(t.claim_company && t.company && t.claim_company !== t.company),
+            assigned: isAssigned,
+            dispatch_mode: t.dispatch_mode || (isAssigned ? "assign" : "claim"),
           }
         : {},
     },
@@ -1435,6 +1440,7 @@ role_pack_snapshot: a.role_pack_snapshot || null,
 
 _pubTask(t) {
 const result = t.result != null ? t.result : null;
+const assigned = !!(t.assigned || t.dispatch_mode === "assign");
 return {
 id: t.id,
 title: t.title,
@@ -1451,6 +1457,8 @@ prompts: Array.isArray(t.prompts) ? t.prompts : [],
 result,
 delivery: buildDeliveryEnvelope({ ...t, result }),
 artifacts: t.artifacts || [],
+assigned,
+dispatch_mode: t.dispatch_mode || (assigned ? "assign" : null),
 created_at: t.created_at,
 claimed_at: t.claimed_at || null,
 submitted_at: t.submitted_at || null,
@@ -1801,6 +1809,8 @@ _wipeCompanyTraces(s, company_code) {
       t.status = "pending";
       t.claimed_at = null;
       t.claim_company = null;
+      t.assigned = false;
+      t.dispatch_mode = null;
       released_claims.push(t.id);
     }
   }
@@ -2195,7 +2205,7 @@ const a = this._requireAgent(s, doorplate);
 if (a.company !== company) throw new HttpError(403, "只能删除自己公司的成员");
 for (const t of Object.values(s.tasks)) {
 if (t.owner === doorplate && t.status === "claimed") {
-t.owner = null; t.status = "pending"; t.claimed_at = null; t.claim_company = null;
+t.owner = null; t.status = "pending"; t.claimed_at = null; t.claim_company = null; t.assigned = false; t.dispatch_mode = null;
 }
 }
 delete s.agents[doorplate];
@@ -2283,7 +2293,7 @@ meta: row.meta && typeof row.meta === "object" ? row.meta : {},
 };
 });
 }
-_createTask(s, { title, desc, priority, deps, acceptance, company_code, task_type, prompts}) {
+_createTask(s, { title, desc, priority, deps, acceptance, company_code, task_type, prompts, assign_to}) {
 const company = this._assertCompanyActive(s, company_code, "发单").code;
 const pri = (priority || "P1").toUpperCase();
 if (!["P0", "P1", "P2"].includes(pri))
@@ -2312,8 +2322,17 @@ let finalAcceptance = acceptance || "";
 if (type === "video_gen" && !String(finalAcceptance).trim()) {
 finalAcceptance = "提交 JSON：[{prompt, video_url?, asset_id?, meta?}, ...]，覆盖全部提示词。";
 }
+// Optional direct assign: skip plaza, create as claimed
+let assignee = null;
+const assignRaw = assign_to != null ? String(assign_to).trim() : "";
+if (assignRaw) {
+  // Doorplates are muse-NN; normalize then require
+  assignee = this._requireAgent(s, assignRaw.toLowerCase());
+  this._assertCompanyActive(s, assignee.company, "直派（被派人公司）");
+}
 s.taskSeq += 1;
 const id = "T-" + s.taskSeq;
+const ts = now();
 const t = {
 id,
 company,
@@ -2325,22 +2344,56 @@ acceptance: finalAcceptance,
 task_type: type,
 prompts: promptList,
 result: null,
-status: "pending",
-owner: null,
-claim_company: null,
+status: assignee ? "claimed" : "pending",
+owner: assignee ? assignee.doorplate : null,
+claim_company: assignee ? assignee.company : null,
+assigned: !!assignee,
+dispatch_mode: assignee ? "assign" : null,
 artifacts: [],
-created_at: now(),
-claimed_at: null,
+created_at: ts,
+claimed_at: assignee ? ts : null,
 submitted_at: null,
 reviewed_at: null,
 done_at: null,
 };
 s.tasks[id] = t;
 const typeLabel = type === "video_gen" ? "🎬视频生成" : (type === "edit" ? "✂️剪辑" : "任务");
-this._feedPush(s, company, `新${typeLabel} ${id}：${t.title}`);
+if (assignee) {
+  const prev = assignee.current_task;
+  const busyNote = prev && s.tasks[prev] && s.tasks[prev].status === "claimed"
+    ? `（原 current_task ${prev} 被覆盖）`
+    : "";
+  assignee.current_task = id;
+  const cross = t.company && t.company !== assignee.company;
+  const note = cross
+    ? `直派 ${assignee.doorplate}（${assignee.company}）← ${id}（${t.title} · ${t.company}）${busyNote}`
+    : `直派 ${assignee.doorplate} ← ${id}（${t.title}）${busyNote}`;
+  this._feedPush(s, company, note);
+  if (cross) this._feedPush(s, assignee.company, note);
+  this._notifyCompanyLeads(s, t.company, "claim_ok", assignee.doorplate, { task_id: id }, {
+    task_id: id,
+    title: t.title,
+    claimer: assignee.doorplate,
+    claim_company: assignee.company,
+    cross_company: !!cross,
+    assigned: true,
+    dispatch_mode: "assign",
+  });
+  // Notify assignee via mailbox (works cross-company; _sendMail is same-company only)
+  if (!s.mailbox[assignee.doorplate]) s.mailbox[assignee.doorplate] = [];
+  s.mailbox[assignee.doorplate].push({
+    from: "system",
+    text: `你被直派了 ${id}：${t.title}`,
+    task_id: id,
+    ts,
+    read: false,
+    assigned: true,
+  });
+} else {
+  this._feedPush(s, company, `新${typeLabel} ${id}：${t.title}`);
+}
 return this._pubTask(t);
 }
-
 _listTasks(s, status, company_code) {
 // 待验收 / teams_poll_tasks：只返回发单公司 (t.company) 的任务。
 // 绝不按 claim_company 并入——抢单方不能验收别家单，读路径也不应看到。
@@ -2548,6 +2601,8 @@ t.claim_company = null;
 t.claimed_at = null;
 t.submitted_at = null;
 t.result = null;
+t.assigned = false;
+t.dispatch_mode = null;
 const a = s.agents[prev];
 if (a && a.current_task === id) a.current_task = null;
 this._feedPush(s, caller, `${id} 被打回，已退回待认领${note? "（" + note + "）": ""}`);
@@ -2734,7 +2789,7 @@ required: ["task_id", "approved"]
 },
 {
 name: "teams_create_task",
-description: "Create a new task in YOUR company's task hall. 给本公司发布新任务。Anyone (usually the lead) can publish; idle agents will see it on their next poll. Keywords: create, publish, new task, 发布任务, 新建.",
+description: "Create a new task in YOUR company's task hall. 默认进广场 pending 供抢单；传 assign_to（门牌）则直派：立刻 claimed，跳过广场。Anyone (usually the lead) can publish. Keywords: create, publish, assign, 发布任务, 直派, 新建.",
 inputSchema: {
 type: "object",
 properties: {
@@ -2742,7 +2797,10 @@ title: { type: "string", description: "Task title. Optional for video_gen (auto 
 desc: { type: "string", description: "Task description"},
 priority: { type: "string", enum: ["P0", "P1", "P2"], description: "Priority, default P1"},
 doorplate: { type: "string", description: "Your doorplate (used to scope to your company)"},
-company_code: { type: "string", description: "Company code (alternative to doorplate for scoping)"}
+company_code: { type: "string", description: "Company code (alternative to doorplate for scoping)"},
+assign_to: { type: "string", description: "Optional doorplate to assign immediately (claimed, skip plaza). 直派门牌，跳过抢单。Cross-company OK. video_gen 直派也可用 HTTP POST /api/tasks."},
+task_type: { type: "string", description: "general|video_gen|edit (default general)"},
+prompts: { description: "For video_gen: array or multiline string of prompts"}
 },
 required: ["title"]
 }

@@ -12,12 +12,19 @@ function ModalBg({ show, onClose, children, wide }) {
 }
 
 /* ---------- 发布任务 ---------- */
-export function PublishTaskModal({ show, onClose, onCreated, toast }) {
+export function PublishTaskModal({ show, onClose, onCreated, toast, agents }) {
   const [tplKey, setTplKey] = useState('');
   const [title, setTitle] = useState('');
   const [desc, setDesc] = useState('');
   const [pri, setPri] = useState('P1');
+  const [assignTo, setAssignTo] = useState('');
   const [busy, setBusy] = useState(false);
+  const roster = Array.isArray(agents) ? agents : [];
+
+  useEffect(() => {
+    if (!show) return;
+    setAssignTo('');
+  }, [show]);
 
   const applyTpl = (k) => {
     setTplKey(k);
@@ -33,10 +40,16 @@ export function PublishTaskModal({ show, onClose, onCreated, toast }) {
     if (!title.trim()) { toast('先填个标题', true); return; }
     setBusy(true);
     try {
-      await api.createTask({ title: title.trim(), desc: desc.trim(), priority: pri });
-      setTitle(''); setDesc(''); setTplKey(''); setPri('P1');
+      const task = await api.createTask({
+        title: title.trim(),
+        desc: desc.trim(),
+        priority: pri,
+        ...(assignTo ? { assign_to: assignTo } : {}),
+      });
+      setTitle(''); setDesc(''); setTplKey(''); setPri('P1'); setAssignTo('');
       onClose();
-      toast('✈️ 纸飞机折好啦，马上从窗口飞进来！');
+      if (assignTo) toast(`🎯 已直派给 ${assignTo} · ${task?.id || ''}`);
+      else toast('✈️ 纸飞机折好啦，马上从窗口飞进来！');
       if (onCreated) onCreated();
     } catch (e) {
       toast('发布失败: ' + e.message, true);
@@ -45,10 +58,14 @@ export function PublishTaskModal({ show, onClose, onCreated, toast }) {
     }
   };
 
+  const assignLabel = assignTo
+    ? (roster.find((a) => a.doorplate === assignTo)?.name || assignTo)
+    : '';
+
   return (
     <ModalBg show={show} onClose={onClose}>
       <h2 className="serif">📤 发布任务</h2>
-      <div className="msub">写张纸条，折成纸飞机从窗口飞进客厅</div>
+      <div className="msub">写张纸条，折成纸飞机从窗口飞进客厅；可选直派指定员工</div>
       <div className="field">
         <label>任务模板</label>
         <select value={tplKey} onChange={(e) => applyTpl(e.target.value)}>
@@ -74,9 +91,22 @@ export function PublishTaskModal({ show, onClose, onCreated, toast }) {
           <option value="P2">P2 低</option>
         </select>
       </div>
+      <div className="field">
+        <label>指定员工（可选 · 留空=扔进广场）</label>
+        <select value={assignTo} onChange={(e) => setAssignTo(e.target.value)}>
+          <option value="">不指定 · 扔进广场抢单</option>
+          {roster.map((a) => (
+            <option key={a.doorplate} value={a.doorplate}>
+              {(a.name || a.doorplate) + ' · ' + a.doorplate}
+            </option>
+          ))}
+        </select>
+      </div>
       <div className="row">
         <button className="btn btn-ghost" onClick={onClose}>取消</button>
-        <button className="btn" onClick={submit} disabled={busy}>折成飞机扔出去 ✈️</button>
+        <button className="btn" onClick={submit} disabled={busy}>
+          {assignTo ? `直派给 ${assignLabel} 🎯` : '折成飞机扔出去 ✈️'}
+        </button>
       </div>
     </ModalBg>
   );
