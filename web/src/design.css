@@ -606,6 +606,15 @@ body {
   font-family: ui-monospace, monospace;
   margin-top: 1px;
 }
+.emp-muse {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .emp-status {
   display: flex;
   align-items: center;

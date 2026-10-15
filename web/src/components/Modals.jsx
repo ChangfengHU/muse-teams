@@ -124,6 +124,8 @@ export function InviteModal({ show, onClose, toast }) {
 ② 为本公司创建专属调度器（cron 每 2 分钟：对账、心跳、自动验收、扫单认领、派单到窗口、查信），与其他公司调度器完全独立；调度器必须对该名单每个 worker 调 teams_heartbeat / POST /api/agents/heartbeat（带 doorplate + company_code），超过 180 秒无心跳会显示休眠；
 ③ 完成后跟我说一句：「调度器已创建并接管，门牌号 <doorplate> 心跳正常」。
 
+【强制】旁聊调 teams_register / teams_redeem_invite 时必须同时传 muse_account（当前登录 Muse 账号）和 muse_session（本旁聊会话名），两者都存进员工档案，方便从门牌反查是哪个 Muse。
+
 创建旁聊后，把下面这段完整注册 prompt 原样发到旁聊里（不要改、不要缩写）：
 
 ${prompt}`;

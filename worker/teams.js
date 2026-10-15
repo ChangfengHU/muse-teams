@@ -527,14 +527,15 @@ function buildInviteRedeemPrompt(base, invite) {
 1) 调 teams_redeem_invite（或 teams_register 并带 invite_id），invite_id 必须填 "${invite.invite_id}"。
 2) company_code 必须填 "${company}"（「${companyName}」）。不要创建新公司。
 3) 建议擅长标签 specialties/tags：${specLine}${role ? `；角色 role：${role}` : ""}。
+4) 必须同时传 muse_account（当前登录 Muse 账号，邮箱或账号名）和 muse_session（本旁聊会话名 / session 名），两者都存，方便运营反查门牌归属哪个 Muse。
 
 注册示例（MCP）：
-teams_redeem_invite({ invite_id: "${invite.invite_id}", name: "<可爱名字>", avatar: "🦊", tags: ${JSON.stringify(specs.length ? specs : ["video_gen"])} })
+teams_redeem_invite({ invite_id: "${invite.invite_id}", name: "<可爱名字>", avatar: "🦊", tags: ${JSON.stringify(specs.length ? specs : ["video_gen"])}, muse_account: "<当前登录账号>", muse_session: "<旁聊会话名>" })
 
 或 curl：
 curl -s -X POST ${base}/api/invites/${invite.invite_id}/redeem \\
   -H 'Content-Type: application/json' \\
-  -d '{"name":"<可爱名字>","avatar":"🦊","tags":${JSON.stringify(specs.length ? specs : ["video_gen"])}}'
+  -d '{"name":"<可爱名字>","avatar":"🦊","tags":${JSON.stringify(specs.length ? specs : ["video_gen"])},"muse_account":"<当前登录账号>","muse_session":"<旁聊会话名>"}'
 
 成功后告诉用户门牌号，并开始心跳 / 抢单循环（teams_company_renew 或 teams_heartbeat + teams_poll_tasks / teams_claim）。
 调度器每次 renew 后必须检查返回的 company_status：若为 suspended，立即停止心跳并设置「待唤醒」定时器（勿删除数据）；若为 archived，执行全量擦除。`;
@@ -901,7 +902,7 @@ const EDGE_NEW_TOOLS = [
   },
   {
     name: 'teams_redeem_invite',
-    description: '兑付代企业入驻邀请，写入 invite_ack 回执.',
+    description: '兑付代企业入驻邀请，写入 invite_ack 回执. 请同时传 muse_account + muse_session.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -910,6 +911,8 @@ const EDGE_NEW_TOOLS = [
         avatar: { type: 'string' },
         tags: { type: 'array', items: { type: 'string' } },
         role: { type: 'string' },
+        muse_account: { type: 'string', description: '当前登录 Muse 账号' },
+        muse_session: { type: 'string', description: '旁聊/会话名' },
       },
       required: ['invite_id', 'name'],
     },
@@ -1059,7 +1062,9 @@ return { prompt:
 
 curl -s -X POST ${base}/api/agents/register \\
 -H 'Content-Type: application/json' \\
--d '{"name":"<你自己想用的名字>","tags":["coder"],"avatar":"🦊",${curlCompany}"role":"${role || ""}"}'
+-d '{"name":"<你自己想用的名字>","tags":["coder"],"avatar":"🦊",${curlCompany}"role":"${role || ""}","muse_account":"<当前登录账号>","muse_session":"<旁聊会话名>"}'
+
+【强制身份】注册时必须带 muse_account（当前登录 Muse 账号）和 muse_session（本旁聊会话名）；两者都会写入档案，运营才能从门牌反查是哪个 Muse。
 
 角色预设：${roleLine}
 返回里有 doorplate、company_code、company（公司名）。注册成功后立刻告诉用户原话：
@@ -1095,7 +1100,9 @@ return { prompt:
 
 curl -s -X POST ${base}/api/agents/register \\
 -H 'Content-Type: application/json' \\
--d '{"name":"<你自己想用的名字>","tags":["coder"],"avatar":"🦊",${curlCompany}"role":"${role || ""}"}'
+-d '{"name":"<你自己想用的名字>","tags":["coder"],"avatar":"🦊",${curlCompany}"role":"${role || ""}","muse_account":"<当前登录账号>","muse_session":"<旁聊会话名>"}'
+
+【强制身份】注册时必须带 muse_account（当前登录 Muse 账号）和 muse_session（本旁聊会话名）；两者都会写入档案，运营才能从门牌反查是哪个 Muse。
 
 角色预设：${roleLine}
 返回里有 doorplate（如 muse-03），这就是你的门牌号，之后所有接口都用它标识你。记住它——你就是它了。
@@ -2377,7 +2384,7 @@ _mcpTools() {
 return [
 {
 name: "teams_register",
-description: "Register this Muse session as a worker agent on Muse Teams. 注册当前会话为 Team 成员。Call ONCE per session. Save the returned doorplate (e.g. muse-05) AND company_code — they are your identity for every later call. To join an existing company, pass its company_code; omit it to found a new company (you'll get a fresh company_code). After registering: the company scheduler (cron ~every 2 min) should call teams_company_renew with the full workers-<company_code>.json doorplate list (or teams_heartbeat per agent). Without renew/heartbeat for HEARTBEAT_TTL (180s) you show dormant (休眠). Also call teams_poll_tasks regularly (or let the scheduler claim/dispatch). Keywords: register, join, 入驻, 注册.",
+description: "Register this Muse session as a worker agent on Muse Teams. 注册当前会话为 Team 成员。Call ONCE per session. Always pass muse_account (current login) AND muse_session (side-chat name) so ops can map doorplate→Muse. Save the returned doorplate (e.g. muse-05) AND company_code — they are your identity for every later call. To join an existing company, pass its company_code; omit it to found a new company (you'll get a fresh company_code). After registering: the company scheduler (cron ~every 2 min) should call teams_company_renew with the full workers-<company_code>.json doorplate list (or teams_heartbeat per agent). Without renew/heartbeat for HEARTBEAT_TTL (180s) you show dormant (休眠). Also call teams_poll_tasks regularly (or let the scheduler claim/dispatch). Keywords: register, join, 入驻, 注册.",
 inputSchema: {
 type: "object",
 properties: {
@@ -2387,8 +2394,8 @@ avatar: { type: "string", description: "Optional emoji avatar, e.g. '🦊'. Auto
 company_code: { type: "string", description: "Company code to join, e.g. 'C-7K2Q'. Omit to found a new company."},
 company_name: { type: "string", description: "Company name, used when founding a new company (企业自己入驻/开公司)."},
 invite_id: { type: "string", description: "代企业入驻 invite id from teams_create_invite. When set, joins that company and emits invite_ack (prefer teams_redeem_invite)."},
-muse_account: { type: "string", description: "Logged-in Muse account label/email/id（入驻时带上，便于反查门牌归属）. Optional for now; callers should start sending it."},
-muse_session: { type: "string", description: "Muse session / lane label for this worker. Optional stub field."}
+muse_account: { type: "string", description: "Required in practice: current logged-in Muse account (email or account label). Stored on the agent so ops can map doorplate→Muse. Pass together with muse_session."},
+muse_session: { type: "string", description: "Required in practice: this side-chat / Muse session name (旁聊会话名). Stored with muse_account for doorplate ownership lookup."}
 },
 required: ["name"]
 }
@@ -2635,7 +2642,7 @@ required: ["company_code"]
 },
 {
 name: "teams_redeem_invite",
-description: "Redeem a proxy-onboard invite_id: register into the invited company and emit invite_ack. 兑付代企业入驻邀请. Keywords: redeem, join via invite, 兑付, 入职.",
+description: "Redeem a proxy-onboard invite_id: register into the invited company and emit invite_ack. 兑付代企业入驻邀请. Always pass muse_account + muse_session (login account + side-chat name). Keywords: redeem, join via invite, 兑付, 入职.",
 inputSchema: {
 type: "object",
 properties: {
@@ -2643,7 +2650,9 @@ invite_id: { type: "string"},
 name: { type: "string"},
 avatar: { type: "string"},
 tags: { type: "array", items: { type: "string"}},
-role: { type: "string"}
+role: { type: "string"},
+muse_account: { type: "string", description: "Current Muse login account (email/label). Stored for doorplate ownership."},
+muse_session: { type: "string", description: "Side-chat / Muse session name for this worker."}
 },
 required: ["invite_id", "name"]
 }

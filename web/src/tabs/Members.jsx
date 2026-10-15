@@ -48,6 +48,13 @@ function EmployeeCard({ agent, leadDoorplate, companyCode, onDeleted }) {
       <div className="emp-meta">
         <div className="emp-name">{agent.avatar || ''} {agent.name || agent.doorplate}</div>
         <div className="emp-door">{agent.doorplate}{agent.role === 'lead' ? ' · lead' : ''}</div>
+        {(agent.muse_account || agent.muse_session) && (
+          <div className="emp-muse" title="Muse 账号 / 旁聊会话（入驻时写入）">
+            {agent.muse_account && <span>👤 {agent.muse_account}</span>}
+            {agent.muse_account && agent.muse_session ? ' · ' : ''}
+            {agent.muse_session && <span>💬 {agent.muse_session}</span>}
+          </div>
+        )}
         <div className="emp-status">
           <span className={`st-light ${st === 'busy' ? 'busy' : st}`} />
           {statusLabel(st)}
