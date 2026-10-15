@@ -10,6 +10,7 @@ import Members from './tabs/Members.jsx';
 import Artifacts from './tabs/Artifacts.jsx';
 import Activity from './tabs/Activity.jsx';
 import Companies from './tabs/Companies.jsx';
+import ClaimPlaza from './tabs/ClaimPlaza.jsx';
 import { agentStatus } from './components/Creature.jsx';
 import { artIcon } from './components/Modals.jsx';
 import { deliverCelebration } from './anim.js';
@@ -19,6 +20,7 @@ import './design.css';
 const TAB_TO_HASH = {
   companies: 'companies',
   home: 'home',
+  plaza: 'plaza',
   tasks: 'tasks',
   agents: 'team',
   arts: 'arts',
@@ -236,6 +238,26 @@ export default function App() {
             <div className="empty-hint">连接中…</div>
           )}
 
+          {connected && tab === 'plaza' && (
+            <ClaimPlaza
+              company={company}
+              agents={agents}
+              onToast={toast}
+              onRefresh={() => refresh(true)}
+              onGotoCompany={async (code) => {
+                if (!code) return;
+                try {
+                  const info = await api.getCompanyInfo(code);
+                  setCompany(info.code);
+                  setCompanyInfo(info);
+                  switchTab('home');
+                  toast(`已切换到 ${info.name || info.code} 的客厅`);
+                } catch (e) {
+                  toast('切换公司失败: ' + e.message, true);
+                }
+              }}
+            />
+          )}
           {connected && tab === 'home' && (
             <LivingRoom
               company={company}

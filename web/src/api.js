@@ -110,12 +110,46 @@ invite: (role) => {
 health: () => request('/api/health'),
 
 // 写入（全部带公司码）
-createTask: ({ title, desc, priority }) =>
-  request('/api/tasks', 'POST', { title, desc, priority, company_code: needCompany() }),
+createTask: ({ title, desc, priority, task_type, prompts, acceptance }) =>
+  request('/api/tasks', 'POST', {
+    title, desc, priority,
+    ...(task_type ? { task_type } : {}),
+    ...(prompts != null ? { prompts } : {}),
+    ...(acceptance != null ? { acceptance } : {}),
+    company_code: needCompany(),
+  }),
+/** 手动发「视频生成」单：prompts 为数组或换行分隔字符串 */
+createVideoGenTask: ({ title, prompts, priority, desc, acceptance }) =>
+  request('/api/tasks', 'POST', {
+    title,
+    prompts,
+    priority: priority || 'P1',
+    task_type: 'video_gen',
+    ...(desc != null ? { desc } : {}),
+    ...(acceptance != null ? { acceptance } : {}),
+    company_code: needCompany(),
+  }),
+/** 抢单广场：跨公司任务市集 */
+plaza: ({ status = 'pending', task_type = 'video_gen', company } = {}) => {
+  const q = new URLSearchParams();
+  if (status) q.set('status', status);
+  if (task_type) q.set('task_type', task_type);
+  if (company) q.set('company', company);
+  return request(`/api/plaza?${q.toString()}`);
+},
+getTask: (taskId) => request(`/api/tasks/${encodeURIComponent(taskId)}`),
 claimTask: (taskId, doorplate) =>
   request(`/api/tasks/${encodeURIComponent(taskId)}/claim`, 'POST', { doorplate, company_code: needCompany() }),
 submitTask: (taskId, doorplate, artifacts) =>
   request(`/api/tasks/${encodeURIComponent(taskId)}/submit`, 'POST', { doorplate, artifacts, company_code: needCompany() }),
+/** 提交视频生成结果 JSON（claimant 公司身份） */
+submitTaskResult: (taskId, doorplate, result, artifacts) =>
+  request(`/api/tasks/${encodeURIComponent(taskId)}/submit`, 'POST', {
+    doorplate,
+    result,
+    ...(artifacts ? { artifacts } : {}),
+    company_code: needCompany(),
+  }),
 reviewTask: (taskId, approved, note) =>
   request(`/api/tasks/${encodeURIComponent(taskId)}/review`, 'POST', { approved, note, company_code: needCompany() }),
 deleteTask: (taskId, from) =>
@@ -219,6 +253,15 @@ return s === 'done-pending-review'? 'review': s;
 
 // ---------- 任务模板 ----------
 export const TASK_TEMPLATES = {
+video_gen: {
+label: '🎬 视频生成',
+title: '视频生成：',
+pri: 'P1',
+desc: `（广场请用「发视频单」；此处模板仅备用）
+
+按提示词各生成一条视频，提交 JSON：
+[{ "prompt": "...", "video_url": "https://...", "asset_id": "optional", "meta": {} }]`,
+},
 img: {
 label: '🎨 生图任务',
 title: '生图：',

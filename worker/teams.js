@@ -164,9 +164,16 @@ async function syncStateToD1(db, s) {
       priority: t.priority || "P1",
       deps: t.deps || [],
       acceptance: t.acceptance || "",
+      task_type: t.task_type || "general",
+      prompts: t.prompts || [],
+      result: t.result != null ? t.result : null,
+      claim_company: t.claim_company || null,
       artifacts: t.artifacts || [],
       created_at: t.created_at || null,
       claimed_at: t.claimed_at || null,
+      submitted_at: t.submitted_at || null,
+      reviewed_at: t.reviewed_at || null,
+      done_at: t.done_at || null,
     });
     batch.push(
       db.prepare(
@@ -380,9 +387,16 @@ acceptance: t.acceptance || "",
 status: t.status,
 owner: t.owner || null,
 company: t.company || null,
+claim_company: t.claim_company || null,
+task_type: t.task_type || "general",
+prompts: Array.isArray(t.prompts) ? t.prompts : [],
+result: t.result != null ? t.result : null,
 artifacts: t.artifacts || [],
 created_at: t.created_at,
 claimed_at: t.claimed_at || null,
+submitted_at: t.submitted_at || null,
+reviewed_at: t.reviewed_at || null,
+done_at: t.done_at || null,
 };
 }
 
@@ -586,7 +600,7 @@ const a = this._requireAgent(s, doorplate);
 if (a.company !== company) throw new HttpError(403, "只能删除自己公司的成员");
 for (const t of Object.values(s.tasks)) {
 if (t.owner === doorplate && t.status === "claimed") {
-t.owner = null; t.status = "pending"; t.claimed_at = null;
+t.owner = null; t.status = "pending"; t.claimed_at = null; t.claim_company = null;
 }
 }
 delete s.agents[doorplate];
@@ -618,31 +632,89 @@ return Object.values(s.agents).filter((a) => a.company === company).map((a) => t
 }
 
 // ---------- tasks ----------
-_createTask(s, { title, desc, priority, deps, acceptance, company_code}) {
+_normalizePrompts(prompts, desc) {
+if (Array.isArray(prompts)) {
+return prompts.map((p) => String(p == null ? "" : p).trim()).filter(Boolean).slice(0, 50);
+}
+if (typeof prompts === "string" && prompts.trim()) {
+return prompts.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).slice(0, 50);
+}
+return [];
+}
+_normalizeVideoResult(raw) {
+let arr = null;
+if (Array.isArray(raw)) arr = raw;
+else if (raw && Array.isArray(raw.videos)) arr = raw.videos;
+else if (raw && Array.isArray(raw.results)) arr = raw.results;
+if (!arr) throw new HttpError(400, "result must be an array of {prompt, video_url|asset_id, meta?}");
+return arr.map((item, i) => {
+const row = item && typeof item === "object" ? item : {};
+const prompt = String(row.prompt != null ? row.prompt : "").trim();
+const video_url = row.video_url || row.url || null;
+const asset_id = row.asset_id || row.assetId || null;
+if (!video_url && !asset_id) {
+throw new HttpError(400, `result[${i}] needs video_url or asset_id`);
+}
+return {
+prompt,
+video_url: video_url ? String(video_url) : null,
+asset_id: asset_id ? String(asset_id) : null,
+meta: row.meta && typeof row.meta === "object" ? row.meta : {},
+};
+});
+}
+_createTask(s, { title, desc, priority, deps, acceptance, company_code, task_type, prompts}) {
 if (!title ||!String(title).trim())
 throw new HttpError(400, "title is required");
 const company = this._requireCompany(s, company_code).code;
 const pri = (priority || "P1").toUpperCase();
 if (!["P0", "P1", "P2"].includes(pri))
 throw new HttpError(400, "priority must be P0/P1/P2");
+const type = String(task_type || "general").trim().toLowerCase() || "general";
+const allowedTypes = ["general", "video_gen", "edit"]; // edit reserved for later clip stage
+if (!allowedTypes.includes(type))
+throw new HttpError(400, "task_type must be general|video_gen|edit");
+let promptList = this._normalizePrompts(prompts, desc);
+if (type === "video_gen" && !promptList.length) {
+throw new HttpError(400, "video_gen tasks require prompts (array or multiline string)");
+}
+let finalDesc = desc || "";
+if (type === "video_gen" && promptList.length) {
+const promptBlock = promptList.map((p, i) => `${i + 1}. ${p}`).join("\n");
+if (!String(finalDesc).trim()) {
+finalDesc = `【视频生成】请按下列提示词各生成一条视频，完成后提交 JSON 结果（每条含 prompt + video_url 或 asset_id）。\n\n${promptBlock}`;
+}
+}
+let finalAcceptance = acceptance || "";
+if (type === "video_gen" && !String(finalAcceptance).trim()) {
+finalAcceptance = "提交 JSON：[{prompt, video_url?, asset_id?, meta?}, ...]，覆盖全部提示词。";
+}
 s.taskSeq += 1;
 const id = "T-" + s.taskSeq;
 const t = {
 id,
 company,
 title: String(title).slice(0, 200),
-desc: desc || "",
+desc: finalDesc,
 priority: pri,
 deps: deps || [],
-acceptance: acceptance || "",
+acceptance: finalAcceptance,
+task_type: type,
+prompts: promptList,
+result: null,
 status: "pending",
 owner: null,
+claim_company: null,
 artifacts: [],
 created_at: now(),
 claimed_at: null,
+submitted_at: null,
+reviewed_at: null,
+done_at: null,
 };
 s.tasks[id] = t;
-this._feedPush(s, company, `新任务 ${id}：${t.title}`);
+const typeLabel = type === "video_gen" ? "🎬视频生成" : (type === "edit" ? "✂️剪辑" : "任务");
+this._feedPush(s, company, `新${typeLabel} ${id}：${t.title}`);
 return this._pubTask(t);
 }
 
@@ -651,6 +723,54 @@ const company = this._requireCompany(s, company_code).code;
 let list = Object.values(s.tasks).filter((t) => t.company === company).sort((a, b) => b.created_at - a.created_at);
 if (status && status!== "all") list = list.filter((t) => t.status === status);
 return list.map((t) => this._pubTask(t));
+}
+_enrichTask(s, t) {
+const pub = this._pubTask(t);
+const co = s.companies[t.company];
+const claimCo = t.claim_company ? s.companies[t.claim_company] : null;
+const ownerA = t.owner ? s.agents[t.owner] : null;
+return {
+...pub,
+company_name: co ? co.name : (t.company || null),
+claim_company_name: claimCo ? claimCo.name : (t.claim_company || null),
+owner_name: ownerA ? (ownerA.name || t.owner) : (t.owner || null),
+owner_avatar: ownerA ? ownerA.avatar : null,
+};
+}
+_listPlaza(s, { status, task_type, company}) {
+let list = Object.values(s.tasks || {}).slice();
+const st = status || "pending";
+if (st && st !== "all") list = list.filter((t) => t.status === st);
+if (task_type && task_type !== "all") {
+list = list.filter((t) => (t.task_type || "general") === task_type);
+}
+if (company) {
+const c = this._normCompanyCode(company);
+list = list.filter((t) => t.company === c);
+}
+list.sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+return list.map((t) => this._enrichTask(s, t));
+}
+_plazaFeed(s, limit) {
+const n = Math.min(Math.max(Number(limit) || 30, 1), 100);
+const items = [];
+for (const [code, feed] of Object.entries(s.feeds || {})) {
+const c = s.companies[code];
+for (const row of feed || []) {
+items.push({
+ts: row.ts,
+text: row.text,
+company: code,
+company_name: c ? c.name : code,
+});
+}
+}
+items.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+return items.slice(0, n);
+}
+_getTask(s, id) {
+const t = this._requireTask(s, id);
+return this._enrichTask(s, t);
 }
 
 _claim(s, id, doorplate, company_code) {
@@ -668,6 +788,7 @@ throw new HttpError(409, `task ${id} blocked by ${dep}`, { blocked_by: dep});
 }
 t.status = "claimed";
 t.owner = doorplate;
+t.claim_company = a.company;
 t.claimed_at = now();
 a.current_task = id;
 const cross = t.company && t.company!== a.company;
@@ -676,23 +797,47 @@ const note = cross
   : `${doorplate} 认领了 ${id}（${t.title}）`;
 this._feedPush(s, a.company, note);
 if (cross) this._feedPush(s, t.company, note);
-return this._pubTask(t);
+return this._enrichTask(s, t);
 }
 
-_submit(s, id, doorplate, artifacts, company_code) {
+_submit(s, id, doorplate, artifacts, company_code, result) {
 const company = this._requireCompanyCode(s, company_code);
 const t = this._requireTask(s, id);
 const a = this._requireAgent(s, doorplate);
-if (t.company!== company) throw new HttpError(403, `task ${id} 不属于公司 ${company}`);
+// Claimant company authenticates; publisher company may differ (cross-company claim).
 if (a.company!== company) throw new HttpError(403, `${doorplate} 不属于公司 ${company}`);
 if (t.owner!== doorplate)
 throw new HttpError(403, `task ${id} owned by ${t.owner}, not ${doorplate}`);
+if (t.claim_company && t.claim_company !== company)
+throw new HttpError(403, `task ${id} was claimed by company ${t.claim_company}`);
 if (t.status!== "claimed")
 throw new HttpError(409, `task ${id} is ${t.status}, cannot submit`);
-t.artifacts = artifacts || [];
+let arts = artifacts || [];
+if (result != null) {
+const normalized = this._normalizeVideoResult(result);
+t.result = normalized;
+arts = [
+...(Array.isArray(artifacts) ? artifacts.filter((x) => x && x.type !== "video_results") : []),
+{
+type: "video_results",
+content: JSON.stringify(normalized, null, 2),
+meta: { task_type: t.task_type || "video_gen", count: normalized.length },
+},
+...normalized.map((row) => ({
+type: "video",
+url: row.video_url || undefined,
+content: row.prompt || "",
+meta: { ...(row.meta || {}), asset_id: row.asset_id || undefined },
+})),
+];
+}
+t.artifacts = arts;
+t.submitted_at = now();
 t.status = "review";
-this._feedPush(s, a.company, `${doorplate} 提交了 ${id} 的产物，待验收`);
-return this._pubTask(t);
+const note = `${doorplate}（${a.company}）提交了 ${id} 的产物，待验收`;
+this._feedPush(s, a.company, note);
+if (t.company && t.company !== a.company) this._feedPush(s, t.company, note);
+return this._enrichTask(s, t);
 }
 
 _review(s, id, approved, note, company_code) {
@@ -703,19 +848,29 @@ if (t.status!== "review")
 throw new HttpError(409, `task ${id} is ${t.status}, not awaiting review`);
 if (approved) {
 t.status = "done";
+t.reviewed_at = now();
+t.done_at = now();
 const a = s.agents[t.owner];
 if (a && a.current_task === id) a.current_task = null;
 this._feedPush(s, caller, `${id} 验收通过 ✅${note? "（" + note + "）": ""}`);
+if (t.claim_company && t.claim_company !== caller) {
+this._feedPush(s, t.claim_company, `${id} 验收通过 ✅${note? "（" + note + "）": ""}`);
+}
 } else {
 const prev = t.owner;
+const prevCo = t.claim_company;
 t.status = "pending";
 t.owner = null;
+t.claim_company = null;
 t.claimed_at = null;
+t.submitted_at = null;
+t.result = null;
 const a = s.agents[prev];
 if (a && a.current_task === id) a.current_task = null;
 this._feedPush(s, caller, `${id} 被打回，已退回待认领${note? "（" + note + "）": ""}`);
+if (prevCo && prevCo !== caller) this._feedPush(s, prevCo, `${id} 被打回，已退回待认领${note? "（" + note + "）": ""}`);
 }
-return this._pubTask(t);
+return this._enrichTask(s, t);
 }
 
 // ---------- mailbox ----------
@@ -967,7 +1122,7 @@ case "teams_heartbeat": return this._heartbeat(s, a.doorplate, a.current_task, a
 case "teams_company_renew": return this._companyRenew(s, a.company_code, a.doorplates, a.from);
 case "teams_poll_tasks": return { tasks: this._listTasks(s, a.status || "pending", this._resolveCompany(s, a))};
 case "teams_claim": return this._claim(s, a.task_id, a.doorplate, a.company_code);
-case "teams_submit": return this._submit(s, a.task_id, a.doorplate, a.artifacts, a.company_code);
+case "teams_submit": return this._submit(s, a.task_id, a.doorplate, a.artifacts, a.company_code, a.result);
 case "teams_review": return this._review(s, a.task_id, a.approved, a.note, this._resolveCompany(s, a));
 case "teams_create_task": return this._createTask(s, {...a, company_code: this._resolveCompany(s, a)});
 case "teams_send_mail": return this._sendMail(s, a.from, a.to, a.text, a.task_id, a.company_code);
@@ -1126,17 +1281,36 @@ return json(this._deleteAgent(s, r[1], companyOf(body) || query.get("company"), 
 if (method === "POST" && r.length === 1 && r[0] === "tasks")
 return json(this._createTask(s, body || {}));
 
+// GET /api/plaza?status=&task_type=&company= — cross-company open market
+if (method === "GET" && r.length === 1 && r[0] === "plaza")
+return json({
+tasks: this._listPlaza(s, {
+status: query.get("status") || "pending",
+task_type: query.get("task_type"),
+company: query.get("company") || null,
+}),
+feed: this._plazaFeed(s, query.get("feed_limit") || 30),
+});
+
+// GET /api/plaza/feed
+if (method === "GET" && r.length === 2 && r[0] === "plaza" && r[1] === "feed")
+return json({ feed: this._plazaFeed(s, query.get("limit") || 40) });
+
 // GET /api/tasks?status=&company=
 if (method === "GET" && r.length === 1 && r[0] === "tasks")
 return json({ tasks: this._listTasks(s, query.get("status"), query.get("company"))});
+
+// GET /api/tasks/:id — single task detail (cross-company readable for plaza)
+if (method === "GET" && r.length === 2 && r[0] === "tasks")
+return json(this._getTask(s, r[1]));
 
 // POST /api/tasks/:id/claim (body: doorplate + company_code 必填)
 if (method === "POST" && r.length === 3 && r[0] === "tasks" && r[2] === "claim")
 return json(this._claim(s, r[1], body.doorplate, body.company_code));
 
-// POST /api/tasks/:id/submit (body: doorplate + company_code 必填)
+// POST /api/tasks/:id/submit (body: doorplate + company_code 必填; optional result for video_gen)
 if (method === "POST" && r.length === 3 && r[0] === "tasks" && r[2] === "submit")
-return json(this._submit(s, r[1], body.doorplate, body.artifacts, body.company_code));
+return json(this._submit(s, r[1], body.doorplate, body.artifacts, body.company_code, body.result));
 
 // POST /api/tasks/:id/review (body.company_code 必填)
 if (method === "POST" && r.length === 3 && r[0] === "tasks" && r[2] === "review")

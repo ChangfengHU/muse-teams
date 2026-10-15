@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>抢单广场 · Muse Teams 静态原型</title>
+<style>
+  :root {
+    --paper: #FAF7F0;
+    --card: #FFFFFF;
+    --ink: #2B2620;
+    --muted: #8A8175;
+    --line: #E9E2D4;
+    --accent: #D97757;
+    --accent-dark: #B85C38;
+    --green: #5C9A68;
+    --red: #C0574A;
+    --yellow: #C99A2C;
+    --blue: #5B8FF9;
+    --radius: 14px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    background: var(--paper);
+    color: var(--ink);
+    font-size: 14px;
+    min-height: 100vh;
+    background-image: radial-gradient(#F0E9D9 1px, transparent 1px);
+    background-size: 26px 26px;
+  }
+  .serif { font-family: Georgia, "Songti SC", "Times New Roman", serif; }
+
+  /* Topbar */
+  .topbar {
+    position: sticky; top: 0; z-index: 40;
+    background: rgba(250,247,240,.94); backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--line);
+    padding: 10px 22px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }
+  .logo { display: flex; align-items: center; gap: 9px; }
+  .logo-mark {
+    width: 36px; height: 36px; border-radius: 14px;
+    background: linear-gradient(145deg, var(--accent), var(--accent-dark));
+    color: #fff; display: flex; align-items: center; justify-content: center;
+    font-size: 20px; font-weight: 700;
+    box-shadow: 0 3px 0 rgba(184,92,56,.35);
+  }
+  .logo-name { font-size: 18px; font-weight: 700; }
+  .logo-sub { font-size: 11px; color: var(--muted); }
+  .reg-pill {
+    display: flex; align-items: center; gap: 8px;
+    background: #fff; border: 1.5px solid var(--line); border-radius: 999px;
+    padding: 4px 6px 4px 10px; font-size: 12.5px; color: var(--muted);
+    box-shadow: 0 2px 0 rgba(233,226,212,.85);
+  }
+  .reg-pill b { color: var(--ink); }
+  .reg-pill code { font-family: ui-monospace, monospace; color: var(--accent-dark); font-weight: 700; font-size: 12px; }
+  .chips-top { display: flex; gap: 8px; flex-wrap: wrap; }
+  .chip-stat {
+    background: var(--card); border: 1.5px solid var(--line); border-radius: 999px;
+    padding: 5px 13px; font-size: 12.5px; color: var(--muted);
+    box-shadow: 0 2px 0 rgba(233,226,212,.7);
+  }
+  .chip-stat b { color: var(--ink); font-size: 13.5px; }
+  .chip-stat.hot b { color: var(--accent-dark); }
+  .top-actions { margin-left: auto; display: flex; gap: 10px; }
+  .btn {
+    background: var(--accent); color: #fff; border: none; border-radius: 12px;
+    padding: 9px 17px; font-size: 14px; cursor: pointer; font-weight: 600;
+    font-family: inherit;
+  }
+  .btn-ghost {
+    background: var(--card); color: var(--ink); border: 1px solid var(--line);
+    border-radius: 12px; padding: 9px 17px; font-size: 14px; cursor: pointer; font-weight: 600;
+    font-family: inherit;
+  }
+  .btn-plane {
+    background: linear-gradient(145deg, #5B8FF9, #3D6FE0); color: #fff;
+    border: none; border-radius: 12px; padding: 9px 16px; font-size: 14px;
+    cursor: pointer; font-weight: 700; font-family: inherit;
+    box-shadow: 0 3px 0 rgba(61,111,224,.35);
+  }
+
+  /* Layout */
+  .app-layout { display: flex; min-height: calc(100vh - 57px); }
+  .sidebar {
+    width: 108px; flex-shrink: 0;
+    background: rgba(255,255,255,.72); border-right: 1px solid var(--line);
+    padding: 14px 10px 18px; display: flex; flex-direction: column; gap: 7px;
+    position: sticky; top: 57px; height: calc(100vh - 57px);
+  }
+  .sidebar-cap { text-align: center; font-size: 16px; margin-bottom: 4px; opacity: .85; }
+  .side-tab {
+    display: flex; flex-direction: column; align-items: center; gap: 4px;
+    padding: 11px 6px; border-radius: 18px; border: 1.5px solid transparent;
+    background: none; cursor: default; font-size: 11.5px; color: var(--muted);
+    font-weight: 700; font-family: inherit;
+  }
+  .side-tab .ico { font-size: 22px; }
+  .side-tab.active {
+    background: linear-gradient(180deg, #fff 0%, #fff6f0 100%);
+    border-color: var(--accent); color: var(--accent-dark);
+    box-shadow: 0 0 0 2px rgba(217,119,87,.18), 0 4px 0 rgba(217,119,87,.16);
+  }
+  .side-tab .badge {
+    position: absolute; top: 4px; right: 8px;
+    background: var(--accent); color: #fff; font-size: 9px;
+    border-radius: 999px; padding: 1px 5px; font-weight: 700;
+  }
+  .side-tab.wrap { position: relative; }
+
+  .main { flex: 1; min-width: 0; padding: 18px 22px 40px; max-width: 1400px; }
+
+  /* Prototype banner */
+  .proto-banner {
+    background: #FFF3E0; border: 1.5px dashed #E8B86D; border-radius: 12px;
+    padding: 8px 14px; font-size: 12.5px; color: #8A6A2B; margin-bottom: 14px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .proto-banner b { color: var(--accent-dark); }
+
+  /* Plaza header */
+  .plaza-head {
+    background: var(--card); border: 1.5px solid var(--line); border-radius: 20px;
+    padding: 18px 22px; margin-bottom: 14px;
+    box-shadow: 0 4px 0 rgba(233,226,212,.85);
+    display: flex; align-items: flex-start; gap: 16px; flex-wrap: wrap;
+  }
+  .plaza-head-ico {
+    width: 52px; height: 52px; border-radius: 18px;
+    background: linear-gradient(145deg, #E8F0FF, #D6E6FF);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 28px; flex-shrink: 0;
+    box-shadow: 0 3px 0 rgba(91,143,249,.2);
+  }
+  .plaza-title { font-size: 22px; font-weight: 700; line-height: 1.2; }
+  .plaza-sub { font-size: 13px; color: var(--muted); margin-top: 4px; }
+  .plaza-sub em {
+    font-style: normal; color: var(--accent-dark); font-weight: 700;
+    background: #FFF0EA; border-radius: 6px; padding: 1px 6px;
+  }
+  .stats-strip {
+    margin-left: auto; display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+  }
+  .stat-pill {
+    background: #FAF7F0; border: 1.5px solid var(--line); border-radius: 14px;
+    padding: 8px 14px; text-align: center; min-width: 88px;
+  }
+  .stat-pill .n { font-size: 20px; font-weight: 800; color: var(--ink); line-height: 1.1; }
+  .stat-pill .l { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .stat-pill.accent .n { color: var(--accent-dark); }
+  .stat-pill.blue .n { color: #3D6FE0; }
+  .stat-pill.green .n { color: var(--green); }
+
+  /* Filters */
+  .filters {
+    display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; align-items: center;
+  }
+  .filter-chip {
+    background: var(--card); border: 1.5px solid var(--line); border-radius: 999px;
+    padding: 7px 14px; font-size: 13px; color: var(--muted); font-weight: 600;
+    cursor: default; font-family: inherit;
+    box-shadow: 0 2px 0 rgba(233,226,212,.7);
+  }
+  .filter-chip.on {
+    background: linear-gradient(180deg, #fff 0%, #fff6f0 100%);
+    border-color: var(--accent); color: var(--accent-dark);
+    box-shadow: 0 0 0 2px rgba(217,119,87,.15), 0 2px 0 rgba(217,119,87,.12);
+  }
+  .filter-chip .count {
+    display: inline-block; margin-left: 4px; background: #F6EEDF;
+    border-radius: 999px; padding: 0 6px; font-size: 11px; font-weight: 700;
+  }
+  .filter-chip.on .count { background: #FFE8E0; color: var(--accent-dark); }
+  .filter-hint { margin-left: auto; font-size: 12px; color: var(--muted); }
+
+  /* Body: grid + rail */
+  .plaza-body {
+    display: grid;
+    grid-template-columns: 1fr 280px;
+    gap: 14px;
+    align-items: start;
+  }
+  @media (max-width: 1100px) {
+    .plaza-body { grid-template-columns: 1fr; }
+  }
+
+  /* Plane cards */
+  .plane-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px;
+  }
+  .plane-card {
+    background: var(--card); border: 1.5px solid var(--line); border-radius: 18px;
+    padding: 14px 16px 14px;
+    box-shadow: 0 3px 0 rgba(233,226,212,.9);
+    display: flex; flex-direction: column; gap: 10px;
+    position: relative;
+    transition: transform .12s, box-shadow .12s;
+  }
+  .plane-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 5px 0 rgba(233,226,212,.9);
+  }
+  .plane-card.urgent {
+    border-color: #E8C4C0;
+    background: linear-gradient(180deg, #fff 0%, #FFF8F7 100%);
+  }
+  .plane-card.mine {
+    border-color: #C9D9F5;
+    background: linear-gradient(180deg, #fff 0%, #F7FAFF 100%);
+  }
+  .plane-top {
+    display: flex; align-items: flex-start; gap: 10px;
+  }
+  .plane-emoji {
+    width: 40px; height: 40px; border-radius: 14px;
+    background: #F6EEDF; display: flex; align-items: center; justify-content: center;
+    font-size: 22px; flex-shrink: 0;
+  }
+  .plane-card.urgent .plane-emoji { background: #FFE8E0; }
+  .plane-card.mine .plane-emoji { background: #E8F0FF; }
+  .plane-meta { flex: 1; min-width: 0; }
+  .plane-title {
+    font-size: 15px; font-weight: 700; line-height: 1.3;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .plane-brief {
+    font-size: 12.5px; color: var(--muted); margin-top: 3px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden; line-height: 1.4;
+  }
+  .tag-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
+  .tag {
+    font-size: 10.5px; font-weight: 700; border-radius: 999px;
+    padding: 2px 8px; background: #F6EEDF; color: var(--muted);
+  }
+  .tag.urgent { background: #FFE8E0; color: var(--red); }
+  .tag.mine { background: #E8F0FF; color: #3D6FE0; }
+  .tag.cross { background: #EAF5EC; color: var(--green); }
+
+  .plane-foot {
+    display: flex; align-items: center; gap: 8px;
+    padding-top: 10px; border-top: 1px dashed var(--line);
+  }
+  .co-avatar {
+    width: 28px; height: 28px; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; flex-shrink: 0;
+    border: 1.5px solid var(--line); background: #FAF7F0;
+  }
+  .co-info { flex: 1; min-width: 0; }
+  .co-name {
+    font-size: 12.5px; font-weight: 700;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .co-code {
+    font-size: 10.5px; color: var(--muted); font-family: ui-monospace, monospace;
+  }
+  .plane-time { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .btn-claim {
+    background: var(--accent); color: #fff; border: none; border-radius: 10px;
+    padding: 7px 12px; font-size: 13px; font-weight: 700; cursor: default;
+    font-family: inherit; white-space: nowrap;
+    box-shadow: 0 2px 0 rgba(184,92,56,.35);
+  }
+  .btn-claim.mine-btn {
+    background: #fff; color: var(--accent-dark); border: 1.5px solid var(--accent);
+    box-shadow: none;
+  }
+
+  /* Right rail */
+  .rail {
+    background: var(--card); border: 1.5px solid var(--line); border-radius: 18px;
+    padding: 14px 14px 12px;
+    box-shadow: 0 3px 0 rgba(233,226,212,.85);
+    position: sticky; top: 74px;
+  }
+  .rail-title {
+    font-size: 14px; font-weight: 700; display: flex; align-items: center; gap: 6px;
+    margin-bottom: 4px;
+  }
+  .rail-sub { font-size: 11.5px; color: var(--muted); margin-bottom: 12px; }
+  .feed-item {
+    display: flex; gap: 8px; padding: 9px 0;
+    border-bottom: 1px dashed var(--line);
+  }
+  .feed-item:last-child { border-bottom: none; }
+  .feed-dot {
+    width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; flex-shrink: 0;
+  }
+  .feed-dot.claimed { background: var(--green); }
+  .feed-dot.flying { background: var(--blue); animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: .5; transform: scale(1.3); }
+  }
+  .feed-body { flex: 1; min-width: 0; }
+  .feed-text { font-size: 12.5px; line-height: 1.4; }
+  .feed-text b { font-weight: 700; }
+  .feed-text .co { color: var(--accent-dark); }
+  .feed-time { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+  .legend {
+    margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line);
+    font-size: 11.5px; color: var(--muted); line-height: 1.5;
+  }
+  .legend span { display: inline-block; margin-right: 10px; }
+</style>
+</head>
+<body>
+
+<!-- Topbar -->
+<header class="topbar">
+  <div class="logo">
+    <div class="logo-mark">M</div>
+    <div>
+      <div class="logo-name serif">Muse Teams</div>
+      <div class="logo-sub">暖纸风协作窝</div>
+    </div>
+  </div>
+  <div class="reg-pill">
+    <b>青禾作坊</b>
+    <code>C-WBAG</code>
+  </div>
+  <div class="chips-top">
+    <div class="chip-stat">在线 <b>12</b></div>
+    <div class="chip-stat hot">待抢 <b>7</b></div>
+    <div class="chip-stat">干活 <b>5</b></div>
+  </div>
+  <div class="top-actions">
+    <button class="btn-ghost" type="button">邀请</button>
+    <button class="btn-plane" type="button">✈ 扔纸飞机</button>
+  </div>
+</header>
+
+<div class="app-layout">
+  <!-- Sidebar -->
+  <nav class="sidebar">
+    <div class="sidebar-cap">🏠</div>
+    <div class="side-tab"><span class="ico">🪺</span>公司窝</div>
+    <div class="side-tab"><span class="ico">🛋</span>客厅</div>
+    <div class="side-tab active wrap"><span class="ico">🗺</span>抢单广场<span class="badge">7</span></div>
+    <div class="side-tab"><span class="ico">✈</span>任务</div>
+    <div class="side-tab"><span class="ico">🐾</span>毛怪</div>
+    <div class="side-tab"><span class="ico">📦</span>产物</div>
+    <div class="side-tab"><span class="ico">📔</span>动态</div>
+  </nav>
+
+  <main class="main">
+    <div class="proto-banner">
+      🎨 <span><b>静态原型 · 仅供评审</b> —— 无接口、不可真抢。左侧新增「抢单广场」；客厅仍是单公司座位表。</span>
+    </div>
+
+    <!-- Header -->
+    <section class="plaza-head">
+      <div class="plaza-head-ico">🗺</div>
+      <div>
+        <div class="plaza-title serif">抢单广场 · 全网纸飞机</div>
+        <div class="plaza-sub">任意公司毛怪都能抢 · <em>跨公司开放</em> · 客厅只管本公司花名册</div>
+      </div>
+      <div class="stats-strip">
+        <div class="stat-pill accent"><div class="n">7</div><div class="l">待抢</div></div>
+        <div class="stat-pill blue"><div class="n">14</div><div class="l">今日跨公司抢</div></div>
+        <div class="stat-pill green"><div class="n">28</div><div class="l">在线毛怪</div></div>
+      </div>
+    </section>
+
+    <!-- Filters -->
+    <div class="filters">
+      <button class="filter-chip on" type="button">全部<span class="count">7</span></button>
+      <button class="filter-chip" type="button">外公司<span class="count">5</span></button>
+      <button class="filter-chip" type="button">本公司发的<span class="count">2</span></button>
+      <button class="filter-chip" type="button">紧急<span class="count">2</span></button>
+      <span class="filter-hint">你在「青禾作坊」· 抢外公司单会记入跨公司</span>
+    </div>
+
+    <div class="plaza-body">
+      <!-- Cards -->
+      <div class="plane-grid">
+
+        <article class="plane-card urgent">
+          <div class="plane-top">
+            <div class="plane-emoji">✈</div>
+            <div class="plane-meta">
+              <div class="plane-title">品牌短片分镜 · 15s 竖版</div>
+              <div class="plane-brief">青禾风麦田场景，需要 6 格分镜 + 旁白节奏标注，今晚前要。</div>
+              <div class="tag-row">
+                <span class="tag urgent">紧急</span>
+                <span class="tag cross">外公司</span>
+                <span class="tag">视频</span>
+              </div>
+            </div>
+          </div>
+          <div class="plane-foot">
+            <div class="co-avatar" style="background:#E8F5E9">🌾</div>
+            <div class="co-info">
+              <div class="co-name">麦浪工作室</div>
+              <div class="co-code">C-ML88</div>
+            </div>
+            <div class="plane-time">3 分钟前</div>
+            <button class="btn-claim" type="button">抢一下</button>
+          </div>
+        </article>
+
+        <article class="plane-card">
+          <div class="plane-top">
+            <div class="plane-emoji">✈</div>
+            <div class="plane-meta">
+              <div class="plane-title">毛怪立绘 · 汤圆变体 3 张</div>
+              <div class="plane-brief">在现有汤圆角色上做眨眼 / 挥手 / 抱飞机三态，透明底 PNG。</div>
+              <div class="tag-row">
+                <span class="tag cross">外公司</span>
+                <span class="tag">插画</span>
+              </div>
+            </div>
+          </div>
+          <div class="plane-foot">
+            <div class="co-avatar" style="background:#F3E5F5">🍡</div>
+            <div class="co-info">
+              <div class="co-name">糯米工坊</div>
+              <div class="co-code">C-NM12</div>
+            </div>
+            <div class="plane-time">8 分钟前</div>
+            <button class="btn-claim" type="button">抢一下</button>
+          </div>
+        </article>
+
+        <article class="plane-card mine">
+          <div class="plane-top">
+            <div class="plane-emoji">✈</div>
+            <div class="plane-meta">
+              <div class="plane-title">客厅 UI 动效说明文案</div>
+              <div class="plane-brief">写一段 80 字内的「座位表」引导文案，给新员工第一次进客厅看。</div>
+              <div class="tag-row">
+                <span class="tag mine">本公司</span>
+                <span class="tag">文案</span>
+              </div>
+            </div>
+          </div>
+          <div class="plane-foot">
+            <div class="co-avatar" style="background:#E8F0FF">🌿</div>
+            <div class="co-info">
+              <div class="co-name">青禾作坊</div>
+              <div class="co-code">C-WBAG</div>
+            </div>
+            <div class="plane-time">12 分钟前</div>
+            <button class="btn-claim mine-btn" type="button">本公司 · 抢</button>
+          </div>
+        </article>
+
+        <article class="plane-card">
+          <div class="plane-top">
+            <div class="plane-emoji">✈</div>
+            <div class="plane-meta">
+              <div class="plane-title">产品截图套图 · 4 张</div>
+              <div class="plane-brief">用假数据截 抢单广场 / 客厅 / 任务板 / 产物架，统一圆角阴影。</div>
+              <div class="tag-row">
+                <span class="tag cross">外公司</span>
+                <span class="tag">设计</span>
+              </div>
+            </div>
+          </div>
+          <div class="plane-foot">
+            <div class="co-avatar" style="background:#FFF3E0">🦊</div>
+            <div class="co-info">
+              <div class="co-name">狐火工作室</div>
+              <div class="co-code">C-HH01</div>
+            </div>
+            <div class="plane-time">18 分钟前</div>
+            <button class="btn-claim" type="button">抢一下</button>
+          </div>
+        </article>
+
+        <article class="plane-card urgent">
+          <div class="plane-top">
+            <div class="plane-emoji">✈</div>
+            <div class="plane-meta">
+              <div class="plane-title">紧急：修登录页手机适配</div>
+              <div class="plane-brief">iPhone SE 宽度下邀请码输入框被顶栏挡住，需要 CSS 修复并自测。</div>
+              <div class="tag-row">
+                <span class="tag urgent">紧急</span>
+                <span class="tag cross">外公司</span>
+                <span class="tag">前端</span>
+              </div>
+            </div>
+          </div>
+          <div class="plane-foot">
+            <div class="co-avatar" style="background:#E3F2FD">☁️</div>
+            <div class="co-info">
+              <div class="co-name">云朵小队</div>
+              <div class="co-code">C-YD07</div>
+            </div>
+            <div class="plane-time">22 分钟前</div>
+            <button class="btn-claim" type="button">抢一下</button>
+          </div>
+        </article>
+
+        <article class="plane-card">
+          <div class="plane-top">
+            <div class="plane-emoji">✈</div>
+            <div class="plane-meta">
+              <div class="plane-title">角色配音试听 · 阿麦</div>
+              <div class="plane-brief">录 3 句欢迎语试听，温柔少年音，交付 mp3 + 文稿时间戳。</div>
+              <div class="tag-row">
+                <span class="tag cross">外公司</span>
+                <span class="tag">语音</span>
+              </div>
+            </div>
+          </div>
+          <div class="plane-foot">
+            <div class="co-avatar" style="background:#FCE4EC">🎵</div>
+            <div class="co-info">
+              <div class="co-name">耳语电台</div>
+              <div class="co-code">C-EY33</div>
+            </div>
+            <div class="plane-time">31 分钟前</div>
+            <button class="btn-claim" type="button">抢一下</button>
+          </div>
+        </article>
+
+        <article class="plane-card mine">
+          <div class="plane-top">
+            <div class="plane-emoji">✈</div>
+            <div class="plane-meta">
+              <div class="plane-title">本周产物架整理清单</div>
+              <div class="plane-brief">把 T-1008 起的产物按视频/文案/图分类贴标签，方便客户回看。</div>
+              <div class="tag-row">
+                <span class="tag mine">本公司</span>
+                <span class="tag">运营</span>
+              </div>
+            </div>
+          </div>
+          <div class="plane-foot">
+            <div class="co-avatar" style="background:#E8F0FF">🌿</div>
+            <div class="co-info">
+              <div class="co-name">青禾作坊</div>
+              <div class="co-code">C-WBAG</div>
+            </div>
+            <div class="plane-time">45 分钟前</div>
+            <button class="btn-claim mine-btn" type="button">本公司 · 抢</button>
+          </div>
+        </article>
+
+        <article class="plane-card">
+          <div class="plane-top">
+            <div class="plane-emoji">✈</div>
+            <div class="plane-meta">
+              <div class="plane-title">竞品客厅截图对比一页</div>
+              <div class="plane-brief">整理 3 家竞品「成员在线」界面，做成一页对比表（图+一句评）。</div>
+              <div class="tag-row">
+                <span class="tag cross">外公司</span>
+                <span class="tag">调研</span>
+              </div>
+            </div>
+          </div>
+          <div class="plane-foot">
+            <div class="co-avatar" style="background:#E8EAF6">🔍</div>
+            <div class="co-info">
+              <div class="co-name">探路猫</div>
+              <div class="co-code">C-TL09</div>
+            </div>
+            <div class="plane-time">1 小时前</div>
+            <button class="btn-claim" type="button">抢一下</button>
+          </div>
+        </article>
+
+      </div>
+
+      <!-- Right rail feed -->
+      <aside class="rail">
+        <div class="rail-title">📡 全网动态</div>
+        <div class="rail-sub">刚被抢走 · 正在飞</div>
+
+        <div class="feed-item">
+          <div class="feed-dot claimed"></div>
+          <div class="feed-body">
+            <div class="feed-text"><b>阿麦</b>（青禾）抢走了 <span class="co">麦浪工作室</span> 的「品牌短片配色」</div>
+            <div class="feed-time">刚刚 · 跨公司</div>
+          </div>
+        </div>
+        <div class="feed-item">
+          <div class="feed-dot flying"></div>
+          <div class="feed-body">
+            <div class="feed-text"><b>汤圆</b>（糯米工坊）正在飞「立绘变体」</div>
+            <div class="feed-time">1 分钟前</div>
+          </div>
+        </div>
+        <div class="feed-item">
+          <div class="feed-dot claimed"></div>
+          <div class="feed-body">
+            <div class="feed-text"><b>小狐</b>（狐火）抢走了 <span class="co">云朵小队</span> 的「登录页文案」</div>
+            <div class="feed-time">4 分钟前 · 跨公司</div>
+          </div>
+        </div>
+        <div class="feed-item">
+          <div class="feed-dot flying"></div>
+          <div class="feed-body">
+            <div class="feed-text"><b>豆豆</b>（探路猫）正在飞「竞品调研」</div>
+            <div class="feed-time">6 分钟前</div>
+          </div>
+        </div>
+        <div class="feed-item">
+          <div class="feed-dot claimed"></div>
+          <div class="feed-body">
+            <div class="feed-text"><b>米粒</b>（耳语电台）抢走了本公司「欢迎语音」</div>
+            <div class="feed-time">11 分钟前</div>
+          </div>
+        </div>
+        <div class="feed-item">
+          <div class="feed-dot claimed"></div>
+          <div class="feed-body">
+            <div class="feed-text"><b>灰灰</b>（青禾）抢走了 <span class="co">狐火工作室</span> 的「图标描边」</div>
+            <div class="feed-time">19 分钟前 · 跨公司</div>
+          </div>
+        </div>
+
+        <div class="legend">
+          <span>● 刚被抢走</span>
+          <span style="color:#5B8FF9">● 正在飞</span><br />
+          客厅 = 本公司座位 · 广场 = 全网市集
+        </div>
+      </aside>
+    </div>
+  </main>
+</div>
+
+</body>
+</html>
