@@ -65,8 +65,21 @@ const TOOLS = [
     },
   },
   {
+    name: "invite_lifecycle_compose",
+    description: "Compose company lifecycle prompt via Teams suspend/resume/archive (公司休眠/重开/注销).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        company_code: { type: "string" },
+        action: { type: "string", enum: ["suspend", "resume", "archive"] },
+        from: { type: "string" },
+      },
+      required: ["company_code", "action"],
+    },
+  },
+  {
     name: "invite_deliver",
-    description: "Deliver invite prompt to a channel target. Placeholder records attempt; wire to Muse session inject like image-gen delivery.",
+    description: "Deliver invite/lifecycle prompt to a logged-in Muse channel target. Placeholder records attempt unless MUSE_INJECT_URL set.",
     inputSchema: {
       type: "object",
       properties: {
@@ -74,7 +87,7 @@ const TOOLS = [
         target_id: { type: "string" },
         prompt: { type: "string", description: "Optional override; default fetch invite.prompt from Teams" },
       },
-      required: ["invite_id", "target_id"],
+      required: ["target_id"],
     },
   },
   {
@@ -118,10 +131,35 @@ async function callTool(name, args = {}) {
         teams_api: `${TEAMS_API}/api/invites/${invite.invite_id}`,
       };
     }
+    case "invite_lifecycle_compose": {
+      const code = String(args.company_code || "").trim().toUpperCase();
+      const action = String(args.action || "").trim().toLowerCase();
+      const res = await fetch(`${TEAMS_API}/api/companies/${encodeURIComponent(code)}/${action}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ from: args.from || null }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      return {
+        company_code: code,
+        action,
+        kind: action,
+        status: data.status,
+        prompt: data.prompt,
+        muse_action: data.muse_action,
+        wiped: data.wiped || null,
+        terminal: !!data.terminal,
+        teams_result: data,
+      };
+    }
     case "invite_deliver": {
       const targets = loadTargets();
       const target = targets.find((t) => t.id === args.target_id);
       if (!target) throw new Error(`unknown target: ${args.target_id}`);
+      if (target.deliverable === false || target.status === "stub" || target.status === "offline") {
+        throw new Error(`target ${args.target_id} not logged-in deliverable (status=${target.status})`);
+      }
       let prompt = args.prompt;
       if (!prompt) {
         const res = await fetch(`${TEAMS_API}/api/invites/${encodeURIComponent(args.invite_id)}`);
