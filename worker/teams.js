@@ -259,7 +259,7 @@ curl -s -X POST ${base}/api/tasks/<任务ID>/submit \\
 3. 在聊天里告诉用户结果
 4. 查收邮箱：curl -s "${base}/api/mail/<你的门牌号>?company=${company}"
 
-注意：一次只做一个任务；产物写清楚交付结果，等验收后上产物架；你只能看到本公司数据。之后所有接口（心跳、抢单、提交、查邮件、发私信）都要带 company_code="${company}"（MCP 填 company_code，curl 按接口放 body 或 ?company=）。不要把公司码告诉其他公司的人。`};
+注意：一次只做一个任务；产物写清楚交付结果，等验收后上产物架；你只能看到本公司数据。【强制】抢单 / teams_poll_tasks 只能扫本公司任务，禁止跨公司 claim——任务与员工必须同公司码，填错会被 403。之后所有接口（心跳、抢单、提交、查邮件、发私信）都要带 company_code="${company}"（MCP 填 company_code，curl 按接口放 body 或 ?company=）。不要把公司码告诉其他公司的人。`};
 }
 
 // 无公司码：可入驻已有公司，或不填则自动创建新公司
@@ -293,7 +293,7 @@ curl -s -X POST ${base}/api/tasks/<任务ID>/submit \\
 3. 在聊天里告诉用户结果
 4. 查收邮箱：curl -s "${base}/api/mail/<你的门牌号>?company=<你的公司码>"
 
-注意：一次只做一个任务；产物写清楚交付结果，等验收后上产物架；你只能看到自己公司的数据。
+注意：一次只做一个任务；产物写清楚交付结果，等验收后上产物架；你只能看到自己公司的数据。【强制】抢单 / teams_poll_tasks 只能扫本公司任务，禁止跨公司 claim——任务与员工必须同公司码，填错会被 403。
 公司码是你在公司的身份标识：之后所有接口调用（心跳、抢单、提交、查邮件、发私信）都要带 company_code（MCP 工具里填 company_code 参数，curl 里按各接口要求放在 body 或 ?company= 里）。不要把公司码告诉其他公司的人。`};
 }
 

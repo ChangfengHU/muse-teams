@@ -238,9 +238,11 @@ export default function App() {
 
           {connected && tab === 'home' && (
             <LivingRoom
+              company={company}
               agents={agents} tasks={tasks} feed={feed}
               onToast={toast} onRefresh={() => refresh(true)}
               onOpenInvite={() => setShowInvite(true)}
+              onOpenPublish={() => setShowPublish(true)}
               onOpenArtifact={openArtifact}
               onOpenMailbox={() => {}}
               onSendMsg={sendMsg}

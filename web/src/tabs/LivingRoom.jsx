@@ -1,8 +1,8 @@
-// 客厅场景 —— 动画从原型 v4 逐个移植
+// 客厅场景 —— 本公司窝：地毯歇脚 · 窗口飞任务 · 架子收宝贝
 import React, { useRef, useEffect, useState, useCallback } from 'react';
 import Creature, { agentStatus } from '../components/Creature.jsx';
 import MonsterAvatar, { MonsterMini } from '../components/MonsterAvatar.jsx';
-import { api, relTime } from '../api.js';
+import { api } from '../api.js';
 import { welcomeAgent, flyInPlane, claimPounce, claimShake, deliverCelebration, broadcastCheer } from '../anim.js';
 import { artIcon } from '../components/Modals.jsx';
 
@@ -31,7 +31,19 @@ function boardSlots(n) {
   return pos;
 }
 
-export default function LivingRoom({ agents, tasks, feed, onToast, onRefresh, onOpenInvite, onOpenArtifact, onOpenMailbox, onSendMsg }) {
+export default function LivingRoom({
+  company,
+  agents,
+  tasks,
+  feed,
+  onToast,
+  onRefresh,
+  onOpenInvite,
+  onOpenPublish,
+  onOpenArtifact,
+  onOpenMailbox,
+  onSendMsg,
+}) {
   const roomRef = useRef(null);
   const doorRef = useRef(null);
   const boardRef = useRef(null);
@@ -45,33 +57,34 @@ export default function LivingRoom({ agents, tasks, feed, onToast, onRefresh, on
   const [bcOpen, setBcOpen] = useState(false);
   const [bcText, setBcText] = useState('');
 
+  const coName = (company && company.name) || '本公司';
+  const coCode = (company && company.code) || '';
+
   const idle = agents.filter((a) => agentStatus(a) !== 'busy');
   const working = agents.filter((a) => agentStatus(a) === 'busy');
+  const onlineN = agents.filter((a) => agentStatus(a) === 'online').length;
   const rp = rugSlots(Math.max(idle.length, 1));
   const dp = deskSlots();
   const pending = tasks.filter((t) => t.status === 'pending');
   const bp = boardSlots(pending.length);
   const doneTasks = tasks.filter((t) => t.status === 'done');
   const reviewTasks = tasks.filter((t) => t.status === 'review' || t.status === 'done-pending-review');
+  const artCount = doneTasks.reduce((n, t) => n + Math.max((t.artifacts || []).length, 1), 0);
 
   const agentById = useCallback((id) => agents.find((a) => a.doorplate === id), [agents]);
 
-  /* ---- 新成员推门 / 新任务纸飞机（对照原型 refreshAll 的 diff 逻辑） ---- */
+  /* ---- 新成员推门 / 新任务纸飞机 ---- */
   useEffect(() => {
     const prevA = prevAgentsRef.current;
     const prevT = prevTasksRef.current;
-    // 新成员
     agents.forEach((a) => {
       if (!prevA.has(a.doorplate)) {
         prevA.add(a.doorplate);
-        // 等渲染出 creature 后再做动画
         setTimeout(() => {
           const cel = creatureRefs.current[a.doorplate];
           if (!cel) return;
           const st = agentStatus(a);
           const isDesk = st === 'busy';
-          // 注意：idle 成员渲染时做了地毯坐标变换（6+(x/100)*88, 64+(y/100)*32），
-          // 动画终点必须用变换后的坐标，否则动画结束后 creature 会卡在错误位置
           let endLeftPct, endTopPct;
           if (isDesk) {
             const slot = dp[working.findIndex((w) => w.doorplate === a.doorplate) % dp.length];
@@ -93,7 +106,6 @@ export default function LivingRoom({ agents, tasks, feed, onToast, onRefresh, on
         }, 100);
       }
     });
-    // 新任务纸飞机
     pending.forEach((t) => {
       if (!prevT.has(t.id)) {
         prevT.add(t.id);
@@ -118,13 +130,21 @@ export default function LivingRoom({ agents, tasks, feed, onToast, onRefresh, on
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agents, tasks]);
 
-  /* ---- 抢单 ---- */
+  /* ---- 抢单（仅本公司在线员工） ---- */
   const grabClick = (e, taskId) => {
     e.stopPropagation();
     const avail = agents.filter((a) => agentStatus(a) !== 'offline');
     const list = avail.length ? avail : agents;
-    if (!list.length) { onToast('客厅空空的，先去「邀请小伙伴」', true); return; }
-    setPicker({ taskId, list, x: Math.min(e.clientX, window.innerWidth - 240), y: e.clientY + 10 });
+    if (!list.length) {
+      onToast('本窝还没人，先去「邀请小伙伴」', true);
+      return;
+    }
+    setPicker({
+      taskId,
+      list,
+      x: Math.min(e.clientX, window.innerWidth - 260),
+      y: e.clientY + 10,
+    });
   };
 
   const doClaim = async (taskId, doorplate) => {
@@ -133,14 +153,10 @@ export default function LivingRoom({ agents, tasks, feed, onToast, onRefresh, on
     const pel = planeRefs.current[taskId];
     try {
       await api.claimTask(taskId, doorplate);
-      // 冲刺动画（乐观执行，与原型一致）
       claimPounce({
         creatureEl: cel,
         planeEl: pel,
-        onBadge: () => {
-          // 徽章由 current_task 渲染，这里触发刷新即可
-          setTimeout(() => onRefresh(), 100);
-        },
+        onBadge: () => { setTimeout(() => onRefresh(), 100); },
       });
       onToast(`🎉 ${doorplate} 叼走了 ${taskId}！`);
       setTimeout(() => onRefresh(), 1400);
@@ -187,14 +203,54 @@ export default function LivingRoom({ agents, tasks, feed, onToast, onRefresh, on
     }
   };
 
+  const zones = [
+    { key: 'wait', icon: '🛋️', label: '等候区', count: idle.length, hint: '歇脚中' },
+    { key: 'work', icon: '🖥️', label: '工作角', count: working.length, hint: '忙着干' },
+    { key: 'board', icon: '✈️', label: '任务板', count: pending.length, hint: '本公司纸飞机' },
+    { key: 'shelf', icon: '🏠', label: '产物架', count: artCount, hint: '已上架' },
+  ];
+
   return (
     <div className="mt-tabpane lr">
-      <div className="lr-hero">
-        <h2 className="sec-title" style={{ marginBottom: 0 }}>
-          <span className="serif">🏠 毛怪客厅</span>
-          <span className="sec-sub">地毯歇脚 · 窗口飞任务 · 架子收宝贝</span>
-        </h2>
+      {/* 公司窝头 */}
+      <div className="lr-den-head">
+        <div className="lr-den-id">
+          <div className="lr-den-avatar">
+            <MonsterAvatar doorplate={coCode || 'den'} size={48} />
+          </div>
+          <div className="lr-den-meta">
+            <h2 className="lr-den-title serif">
+              {coName}
+              {coCode ? <code className="lr-den-code">{coCode}</code> : null}
+            </h2>
+            <p className="lr-den-tagline">仅本公司毛怪抢本公司纸飞机 · 跨窝抢单会被拦下</p>
+          </div>
+        </div>
+        <div className="lr-den-stats">
+          <span className="lr-den-chip">毛怪 <b>{agents.length}</b></span>
+          <span className="lr-den-chip">在线 <b>{onlineN}</b></span>
+          <span className={`lr-den-chip${reviewTasks.length ? ' hot' : ''}`}>待收 <b>{reviewTasks.length}</b></span>
+        </div>
+        <div className="lr-den-actions">
+          <button type="button" className="btn btn-sm btn-ghost" onClick={onOpenInvite}>🚪 邀请</button>
+          <button type="button" className="btn btn-sm" onClick={onOpenPublish}>📤 扔纸飞机</button>
+        </div>
       </div>
+
+      {/* 分区计数条 */}
+      <div className="lr-zones" role="list">
+        {zones.map((z) => (
+          <div key={z.key} className="lr-zone" role="listitem">
+            <span className="lr-zone-ico" aria-hidden>{z.icon}</span>
+            <div className="lr-zone-body">
+              <div className="lr-zone-label">{z.label}</div>
+              <div className="lr-zone-hint">{z.hint}</div>
+            </div>
+            <span className="lr-zone-n">{z.count}</span>
+          </div>
+        ))}
+      </div>
+
       {/* 房间 */}
       <div className="room" ref={roomRef} id="room">
         <div className="door" ref={doorRef} id="door">
@@ -203,7 +259,7 @@ export default function LivingRoom({ agents, tasks, feed, onToast, onRefresh, on
           <div className="door-sign">🚪 新毛怪从这里推门</div>
         </div>
         <div className="window"><div className="sun">☀️</div></div>
-        <div className="window-label">✈️ 新任务从窗口飞进来</div>
+        <div className="window-label">✈️ 本公司任务从窗口飞进来</div>
         <div className="wall-base" />
         <div className="desks" id="desks">
           {working.map((a, i) => {
@@ -230,12 +286,11 @@ export default function LivingRoom({ agents, tasks, feed, onToast, onRefresh, on
         </div>
         <div className="rug" />
         <div className="room-label" style={{ left: '50%', top: '58%', transform: 'translateX(-50%)' }}>
-          🛋️ 地毯 · 等候区
+          🛋️ 地毯 · 等候区 · {idle.length}
         </div>
-        <div className="room-label" style={{ left: '46%', top: '38%' }}>🖥️ 工作角</div>
+        <div className="room-label" style={{ left: '46%', top: '38%' }}>🖥️ 工作角 · {working.length}</div>
         {idle.map((a, i) => {
           const s = rp[i] || { x: 40, y: 20 };
-          // 地毯内相对定位：room 坐标换算（地毯区域 left 6%-94%, top 64%-96%）
           const leftPct = 6 + (s.x / 100) * 88;
           const topPct = 64 + (s.y / 100) * 32;
           return (
@@ -252,8 +307,10 @@ export default function LivingRoom({ agents, tasks, feed, onToast, onRefresh, on
           );
         })}
         {!agents.length && (
-          <div className="room-label" style={{ left: '50%', top: '80%', transform: 'translateX(-50%)', cursor: 'pointer' }} onClick={onOpenInvite}>
-            🪑 客厅空空的，点这儿邀请小伙伴 →
+          <div className="lr-room-empty">
+            <div className="lr-room-empty-title">本窝还没人</div>
+            <div className="lr-room-empty-sub">邀请一位毛怪注册到 {coName}，它会从这扇门推进来</div>
+            <button type="button" className="btn btn-sm" onClick={onOpenInvite}>🚪 邀请小伙伴</button>
           </div>
         )}
       </div>
@@ -261,8 +318,17 @@ export default function LivingRoom({ agents, tasks, feed, onToast, onRefresh, on
       {/* 任务板 + 产物架 */}
       <div className="board-wrap">
         <div className="board" ref={boardRef} id="board">
-          <div className="board-title">📋 任务板</div>
-          {!pending.length && <div className="board-empty">🎉 板子空啦，扔一张纸飞机吧</div>}
+          <div className="board-title">
+            📋 任务板 · 本公司
+            <span className="board-count">{pending.length}</span>
+          </div>
+          {!pending.length && (
+            <div className="board-empty lr-board-empty">
+              <div className="lr-board-empty-title">本窝还没纸飞机</div>
+              <div className="lr-board-empty-sub">扔一张本公司任务，在线毛怪才能抢</div>
+              <button type="button" className="btn btn-sm" onClick={onOpenPublish}>📤 扔纸飞机</button>
+            </div>
+          )}
           {pending.map((t, i) => {
             const p = String(t.priority || 'P1').toLowerCase();
             const sp = bp[i];
@@ -278,6 +344,7 @@ export default function LivingRoom({ agents, tasks, feed, onToast, onRefresh, on
                 <div className="mt-plane-in">
                   <div className="plane-card">
                     <div className="pin" />
+                    <div className="plane-co-badge">本公司</div>
                     <div className={`prio`}>{t.priority || 'P1'}</div>
                     <div className="pttl">{t.title}</div>
                     <div className="pmeta">{t.id}</div>
@@ -292,9 +359,14 @@ export default function LivingRoom({ agents, tasks, feed, onToast, onRefresh, on
           })}
         </div>
         <div className="shelf">
-          <div className="shelf-title">🏠 产物架</div>
+          <div className="shelf-title">
+            🏠 产物架 · 本公司
+            <span className="board-count">{artCount}</span>
+          </div>
           <div className="shelf-items" ref={shelfRef} id="shelfItems">
-            {!doneTasks.length && <div className="shelf-empty">🕯️ 架子还空着，等第一件产物诞生…</div>}
+            {!doneTasks.length && (
+              <div className="shelf-empty">🕯️ 架子还空着，等本窝第一件产物诞生…</div>
+            )}
             {doneTasks.map((t) => {
               const arts = t.artifacts || [];
               const owner = agentById(t.owner);
@@ -335,20 +407,20 @@ export default function LivingRoom({ agents, tasks, feed, onToast, onRefresh, on
       {/* 跑马灯 */}
       <div className="ticker">
         <div className="mt-ticker-in">
-          {(feed.length ? [...feed, ...feed] : [{ text: '📻 暂无动态' }]).map((f, i) => (
+          {(feed.length ? [...feed, ...feed] : [{ text: `📻 ${coName} 暂无动态` }]).map((f, i) => (
             <span key={i}>{typeof f === 'string' ? f : (f.text || JSON.stringify(f))}</span>
           ))}
         </div>
       </div>
 
-      {/* 抢单选择器 */}
+      {/* 抢单选择器 —— 仅本公司 */}
       {picker && (
         <div className="picker" style={{ left: picker.x, top: picker.y }} onClick={(e) => e.stopPropagation()}>
-          <div className="ph">谁去叼 {picker.taskId}？</div>
+          <div className="ph">谁去叼 {picker.taskId}？<small className="ph-co">仅 {coName}</small></div>
           {picker.list.map((a) => (
             <div key={a.doorplate} className="popt" onClick={() => doClaim(picker.taskId, a.doorplate)}>
               <MonsterAvatar doorplate={a.doorplate} size={34} />
-              <span>{a.name || a.doorplate}<br /><small>{a.doorplate}</small></span>
+              <span>{a.name || a.doorplate}<br /><small>{a.doorplate} · {agentStatus(a)}</small></span>
             </div>
           ))}
         </div>
@@ -359,8 +431,8 @@ export default function LivingRoom({ agents, tasks, feed, onToast, onRefresh, on
       {bcOpen && (
         <div className="modal-bg show" onClick={(e) => { if (e.target === e.currentTarget) setBcOpen(false); }}>
           <div className="modal mt-modal">
-            <h2 className="serif">📢 广播</h2>
-            <div className="msub">全员抬头！</div>
+            <h2 className="serif">📢 广播 · {coName}</h2>
+            <div className="msub">仅本公司毛怪会抬头</div>
             <div className="field">
               <textarea rows={3} value={bcText} onChange={(e) => setBcText(e.target.value)} placeholder="说点什么…" autoFocus />
             </div>
