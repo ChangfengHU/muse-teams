@@ -85,6 +85,98 @@ devops: { name: "DevOps", tags: ["devops"]},
 tester: { name: "测试", tags: ["qa"]},
 };
 
+/**
+ * Employee role packs — Teams-side registry of 能力广场 (plaza) capability refs.
+ * Source of truth for MCP/skill identities: https://fleet.vyibc.com/api/hub/registry
+ * Teams does NOT invent a parallel capability store; packs only reference plaza ids
+ * (mcp:… / skill:…) plus three instruction metas (主聊 / 旁聊调度 / 干活执行).
+ * Invite stores role_pack_id + snapshot; redeem stamps the same onto the agent.
+ */
+const PLAZA_REGISTRY_URL = "https://fleet.vyibc.com/api/hub/registry";
+const ROLE_PACKS = {
+  video_gen_worker: {
+    id: "video_gen_worker",
+    name: "视频生成工人",
+    duty: "抢 video_gen 单，用浏览器/Flow 生成视频并交交付包",
+    specialties: ["video_gen"],
+    instructions: [
+      { role: "main", label: "主聊", summary: "对用户说明进度与验收标准；不直接操作机群，把活派给旁聊调度。", plaza_ref: null },
+      { role: "scheduler", label: "旁聊调度", summary: "约每 2 分钟 teams_company_renew；扫 pending；按 tags 派给干活执行；跟踪 review。", plaza_ref: "mcp:muse-teams" },
+      { role: "worker", label: "干活执行", summary: "teams_claim → 调视频 MCP 生成 → teams_submit 交付包（result[{prompt,video_url|asset_id}]）。", plaza_ref: "mcp:vyibc-video" },
+    ],
+    mcps: ["mcp:muse-teams", "mcp:vyibc-video", "mcp:vyibc-image", "mcp:vyibc-voice", "mcp:vyibc-browser"],
+    skills: [
+      "skill:vyibc-flow-video-studio/flow-video-studio",
+      "skill:vyibc-flow-video-studio/flow-shots",
+      "skill:vyibc-flow-video-studio/flow-delivery",
+    ],
+  },
+  editor: {
+    id: "editor",
+    name: "剪辑编辑",
+    duty: "做 edit / remix：字幕、二创管线、交剪辑产物",
+    specialties: ["edit"],
+    instructions: [
+      { role: "main", label: "主聊", summary: "对齐剪辑需求与素材清单；验收成片与字幕。", plaza_ref: null },
+      { role: "scheduler", label: "旁聊调度", summary: "心跳保活；派 edit 单；跟踪验收打回。", plaza_ref: "mcp:muse-teams" },
+      { role: "worker", label: "干活执行", summary: "转写 / 二创 / 剪辑 MCP；提交交付包。", plaza_ref: "mcp:vyibc-video-remix" },
+    ],
+    mcps: ["mcp:muse-teams", "mcp:vyibc-video-remix", "mcp:vyibc-transcription", "mcp:vyibc-video-content"],
+    skills: [
+      "skill:video-remix-mcp",
+      "skill:vyibc-flow-video-studio/flow-edit",
+      "skill:vyibc-flow-video-studio/flow-postproduction",
+    ],
+  },
+};
+
+function listRolePacks() {
+  return Object.values(ROLE_PACKS).map((p) => ({
+    id: p.id,
+    name: p.name,
+    duty: p.duty,
+    specialties: [...(p.specialties || [])],
+    mcps: [...(p.mcps || [])],
+    skills: [...(p.skills || [])],
+    instructions_meta: (p.instructions || []).map((i) => ({
+      role: i.role,
+      label: i.label,
+      summary: i.summary,
+      plaza_ref: i.plaza_ref || null,
+    })),
+    plaza_source_of_truth: PLAZA_REGISTRY_URL,
+  }));
+}
+
+function resolveRolePack(role_pack_id) {
+  if (role_pack_id == null || role_pack_id === "") return null;
+  const id = String(role_pack_id).trim();
+  const pack = ROLE_PACKS[id];
+  if (!pack) throw new HttpError(404, `unknown role_pack_id: ${id} (known: ${Object.keys(ROLE_PACKS).join(", ")})`);
+  return pack;
+}
+
+function snapshotRolePack(pack) {
+  if (!pack) return null;
+  return {
+    id: pack.id,
+    name: pack.name,
+    duty: pack.duty || "",
+    specialties: [...(pack.specialties || [])],
+    instructions_meta: (pack.instructions || []).map((i) => ({
+      role: i.role,
+      label: i.label,
+      summary: i.summary,
+      plaza_ref: i.plaza_ref || null,
+    })),
+    mcps: [...(pack.mcps || [])],
+    skills: [...(pack.skills || [])],
+    plaza_source_of_truth: PLAZA_REGISTRY_URL,
+    snapped_at: now(),
+  };
+}
+
+
 // Task statuses: pending -> claimed -> review -> done | failed
 // \-> pending (review rejected)
 
@@ -125,6 +217,8 @@ CREATE TABLE IF NOT EXISTS agents (
   current_task TEXT,
   muse_account TEXT,
   muse_session TEXT,
+  role_pack_id TEXT,
+  role_pack_snapshot TEXT,
   PRIMARY KEY (company_code, doorplate)
 );
 CREATE TABLE IF NOT EXISTS tasks (
@@ -153,7 +247,9 @@ CREATE TABLE IF NOT EXISTS invites (
   prompt TEXT,
   created_at INTEGER,
   redeemed_at INTEGER,
-  redeemed_by TEXT
+  redeemed_by TEXT,
+  role_pack_id TEXT,
+  role_pack_snapshot TEXT
 );
 CREATE TABLE IF NOT EXISTS receipts (
   id TEXT PRIMARY KEY,
@@ -355,6 +451,10 @@ async function ensureD1Schema(db) {
     "ALTER TABLE companies ADD COLUMN archived_at INTEGER",
     "ALTER TABLE agents ADD COLUMN muse_account TEXT",
     "ALTER TABLE agents ADD COLUMN muse_session TEXT",
+    "ALTER TABLE agents ADD COLUMN role_pack_id TEXT",
+    "ALTER TABLE agents ADD COLUMN role_pack_snapshot TEXT",
+    "ALTER TABLE invites ADD COLUMN role_pack_id TEXT",
+    "ALTER TABLE invites ADD COLUMN role_pack_snapshot TEXT",
   ]) {
     try { await db.prepare(sql).run(); } catch (_) { /* column may already exist */ }
   }
@@ -440,8 +540,8 @@ async function syncStateToD1(db, s) {
     if (a.company && archivedCodes.has(a.company)) continue;
     batch.push(
       db.prepare(
-        `INSERT INTO agents (doorplate, company_code, name, avatar, tags, role, model, last_heartbeat, current_task, muse_account, muse_session)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO agents (doorplate, company_code, name, avatar, tags, role, model, last_heartbeat, current_task, muse_account, muse_session, role_pack_id, role_pack_snapshot)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).bind(
         a.doorplate,
         a.company || "",
@@ -453,7 +553,9 @@ async function syncStateToD1(db, s) {
         a.last_heartbeat || null,
         a.current_task || null,
         a.muse_account || null,
-        a.muse_session || null
+        a.muse_session || null,
+        a.role_pack_id || null,
+        a.role_pack_snapshot ? JSON.stringify(a.role_pack_snapshot) : null
       )
     );
   }
@@ -580,13 +682,20 @@ function buildInviteRedeemPrompt(base, invite) {
   const role = invite.role || "";
   const specs = Array.isArray(invite.specialties) ? invite.specialties : [];
   const specLine = specs.length ? specs.join(", ") : "video_gen, edit";
+  const snap = invite.role_pack_snapshot || null;
+  const packId = invite.role_pack_id || (snap && snap.id) || null;
+  const packName = (snap && snap.name) || packId || "";
+  const packDuty = (snap && snap.duty) || "";
+  const packLine = packId
+    ? `\n5) 员工角色包 role_pack：${packName}（id=${packId}）${packDuty ? ` — ${packDuty}` : ""}。兑付后画像已挂在门牌上；投递词只带包名/职责，不塞指令全文。`
+    : "";
   return `你是 Muse Teams 的 worker agent。这是【代企业入驻邀请】（invite_id=${invite.invite_id}）。
 
 【强制】
 1) 调 teams_redeem_invite（或 teams_register 并带 invite_id），invite_id 必须填 "${invite.invite_id}"。
 2) company_code 必须填 "${company}"（「${companyName}」）。不要创建新公司。
 3) 建议擅长标签 specialties/tags：${specLine}${role ? `；角色 role：${role}` : ""}。
-4) 必须同时传 muse_account（当前登录 Muse 账号，邮箱或账号名）和 muse_session（本旁聊会话名 / session 名），两者都存，方便运营反查门牌归属哪个 Muse。
+4) 必须同时传 muse_account（当前登录 Muse 账号，邮箱或账号名）和 muse_session（本旁聊会话名 / session 名），两者都存，方便运营反查门牌归属哪个 Muse。${packLine}
 
 注册示例（MCP）：
 teams_redeem_invite({ invite_id: "${invite.invite_id}", name: "<可爱名字>", avatar: "🦊", tags: ${JSON.stringify(specs.length ? specs : ["video_gen"])}, muse_account: "<当前登录账号>", muse_session: "<旁聊会话名>" })
@@ -765,7 +874,19 @@ async function edgeCreateInvite(db, body, base) {
   const co = coRow;
   const company_name = (co && co.name) || company_code;
   const invite_id = 'INV-' + Date.now().toString(36).toUpperCase() + '-' + Array.from({ length: 4 }, () => COMPANY_ALPHABET[Math.floor(Math.random() * COMPANY_ALPHABET.length)]).join('');
-  const specs = normalizeCompanyTags(body.specialties != null ? body.specialties : body.tags);
+  let pack = null;
+  let role_pack_id = null;
+  let role_pack_snapshot = null;
+  if (body.role_pack_id) {
+    pack = resolveRolePack(body.role_pack_id);
+    role_pack_id = pack.id;
+    role_pack_snapshot = snapshotRolePack(pack);
+  }
+  const specsRaw = body.specialties != null ? body.specialties : body.tags;
+  let specs = normalizeCompanyTags(specsRaw);
+  if ((!specs || !specs.length) && pack && pack.specialties) {
+    specs = normalizeCompanyTags(pack.specialties);
+  }
   const invite = {
     invite_id,
     company_code,
@@ -779,14 +900,17 @@ async function edgeCreateInvite(db, body, base) {
     created_at: now(),
     redeemed_at: null,
     redeemed_by: null,
+    role_pack_id,
+    role_pack_snapshot,
     prompt: null,
   };
   invite.prompt = buildInviteRedeemPrompt(base || 'https://teams.vyibc.com', invite);
   await d1Run(db,
-    `INSERT INTO invites (invite_id, company_code, company_name, role, specialties, from_doorplate, target_hint, note, status, prompt, created_at, redeemed_at, redeemed_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
+    `INSERT INTO invites (invite_id, company_code, company_name, role, specialties, from_doorplate, target_hint, note, status, prompt, created_at, redeemed_at, redeemed_by, role_pack_id, role_pack_snapshot)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
     invite.invite_id, invite.company_code, invite.company_name, invite.role,
-    JSON.stringify(specs), invite.from, invite.target_hint, invite.note, invite.status, invite.prompt, invite.created_at
+    JSON.stringify(specs), invite.from, invite.target_hint, invite.note, invite.status, invite.prompt, invite.created_at,
+    role_pack_id, role_pack_snapshot ? JSON.stringify(role_pack_snapshot) : null
   );
   if (invite.from) {
     await edgePushReceipt(db, {
@@ -795,7 +919,7 @@ async function edgeCreateInvite(db, body, base) {
       to: invite.from,
       from: invite.from,
       ref: { invite_id, company_code },
-      body: { role: invite.role, specialties: specs, target_hint: invite.target_hint },
+      body: { role: invite.role, specialties: specs, target_hint: invite.target_hint, role_pack_id, role_pack_name: role_pack_snapshot && role_pack_snapshot.name },
     });
   }
   return invite;
@@ -806,6 +930,8 @@ async function edgeGetInvite(db, invite_id) {
   if (!row) throw new HttpError(404, `unknown invite: ${invite_id}`);
   let specialties = [];
   try { specialties = JSON.parse(row.specialties || '[]'); } catch (_) {}
+  let role_pack_snapshot = null;
+  try { role_pack_snapshot = row.role_pack_snapshot ? JSON.parse(row.role_pack_snapshot) : null; } catch (_) {}
   return {
     invite_id: row.invite_id,
     company_code: row.company_code,
@@ -820,6 +946,8 @@ async function edgeGetInvite(db, invite_id) {
     redeemed_at: row.redeemed_at,
     redeemed_by: row.redeemed_by,
     prompt: row.prompt,
+    role_pack_id: row.role_pack_id || null,
+    role_pack_snapshot,
   };
 }
 
@@ -828,6 +956,13 @@ async function edgeRedeemInvite(db, stub, base, invite_id, agentFields) {
   if (inv.status !== 'pending') throw new HttpError(409, `invite ${invite_id} already ${inv.status}`);
   await edgeAssertCompanyActive(db, inv.company_code, "兑付邀请入职");
   const tags = [...(inv.specialties || []), ...((agentFields && agentFields.tags) || [])];
+  let role_pack_id = inv.role_pack_id || null;
+  let role_pack_snapshot = inv.role_pack_snapshot || null;
+  if (agentFields && agentFields.role_pack_id) {
+    const pack = resolveRolePack(agentFields.role_pack_id);
+    role_pack_id = pack.id;
+    role_pack_snapshot = snapshotRolePack(pack);
+  }
   const regBody = {
     name: agentFields && agentFields.name,
     avatar: agentFields && agentFields.avatar,
@@ -835,6 +970,10 @@ async function edgeRedeemInvite(db, stub, base, invite_id, agentFields) {
     role: (agentFields && agentFields.role) || inv.role || undefined,
     tags,
     company_code: inv.company_code,
+    muse_account: agentFields && agentFields.muse_account,
+    muse_session: agentFields && agentFields.muse_session,
+    role_pack_id,
+    role_pack_snapshot,
   };
   const res = await stub.fetch(new Request(`${base}/api/agents/register`, {
     method: 'POST',
@@ -847,7 +986,7 @@ async function edgeRedeemInvite(db, stub, base, invite_id, agentFields) {
     'UPDATE invites SET status = ?, redeemed_at = ?, redeemed_by = ? WHERE invite_id = ?',
     'redeemed', now(), agent.doorplate, invite_id
   );
-  const ackBody = { invite_id, doorplate: agent.doorplate, name: agent.name, company_code: inv.company_code };
+  const ackBody = { invite_id, doorplate: agent.doorplate, name: agent.name, company_code: inv.company_code, role_pack_id };
   const to = inv.from || agent.doorplate;
   await edgePushReceipt(db, {
     type: 'invite_ack',
@@ -859,6 +998,8 @@ async function edgeRedeemInvite(db, stub, base, invite_id, agentFields) {
   });
   return { agent, invite: { ...inv, status: 'redeemed', redeemed_at: now(), redeemed_by: agent.doorplate } };
 }
+
+
 
 
 
@@ -944,7 +1085,7 @@ const EDGE_NEW_TOOLS = [
   },
   {
     name: 'teams_create_invite',
-    description: '代企业入驻：创建 invite + prompt。渠道投递用独立 invite-mcp.',
+    description: '代企业入驻：创建 invite + prompt。可带 role_pack_id（能力广场角色包）。渠道投递用独立 invite-mcp.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -955,13 +1096,14 @@ const EDGE_NEW_TOOLS = [
         tags: { type: 'array', items: { type: 'string' } },
         target_hint: { type: 'string' },
         note: { type: 'string' },
+        role_pack_id: { type: 'string', description: '员工角色包 id，如 video_gen_worker / editor；广场 MCP/skill refs 快照写入邀请' },
       },
       required: ['company_code'],
     },
   },
   {
     name: 'teams_redeem_invite',
-    description: '兑付代企业入驻邀请，写入 invite_ack 回执. 请同时传 muse_account + muse_session.',
+    description: '兑付代企业入驻邀请，写入 invite_ack 回执. 请同时传 muse_account + muse_session；邀请上的 role_pack 会落到门牌.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -972,9 +1114,15 @@ const EDGE_NEW_TOOLS = [
         role: { type: 'string' },
         muse_account: { type: 'string', description: '当前登录 Muse 账号' },
         muse_session: { type: 'string', description: '旁聊/会话名' },
+        role_pack_id: { type: 'string', description: '可选覆盖；默认用邀请上的角色包' },
       },
       required: ['invite_id', 'name'],
     },
+  },
+  {
+    name: 'teams_list_role_packs',
+    description: 'List employee role packs (能力广场 MCP/skill refs + 三份指令元数据). Plaza registry is source of truth; Teams stores refs + invite/agent snapshots. Keywords: role pack, 角色包, 能力广场.',
+    inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'teams_company_suspend',
@@ -1279,6 +1427,9 @@ last_heartbeat: a.last_heartbeat || null,
 // Muse 账号身份（入驻时可带；用于反查门牌归属）
 muse_account: a.muse_account || null,
 muse_session: a.muse_session || null,
+// 员工角色包（能力广场 refs 快照）
+role_pack_id: a.role_pack_id || null,
+role_pack_snapshot: a.role_pack_snapshot || null,
 };
 }
 
@@ -1832,12 +1983,24 @@ return { ...this._pubCompany(c, { heartbeat_dormant, live_count }), live_count, 
 }
 
 // ---------- invites（代企业入驻 token；渠道投递在独立 invite-mcp）----------
-_createInvite(s, { company_code, role, specialties, tags, from, target_hint, note}, base) {
+_createInvite(s, { company_code, role, specialties, tags, from, target_hint, note, role_pack_id}, base) {
 const company = this._assertCompanyActive(s, company_code, "创建邀请");
 if (from) this._requireAgentInCompany(s, from, company.code);
 s.inviteSeq = (s.inviteSeq || 0) + 1;
 const invite_id = "INV-" + s.inviteSeq + "-" + Array.from({ length: 4}, () => COMPANY_ALPHABET[Math.floor(Math.random() * COMPANY_ALPHABET.length)]).join("");
-const specs = normalizeCompanyTags(specialties != null ? specialties : tags);
+let pack = null;
+let snap = null;
+let packId = null;
+if (role_pack_id) {
+  pack = resolveRolePack(role_pack_id);
+  packId = pack.id;
+  snap = snapshotRolePack(pack);
+}
+const specsRaw = specialties != null ? specialties : tags;
+let specs = normalizeCompanyTags(specsRaw);
+if ((!specs || !specs.length) && pack && pack.specialties) {
+  specs = normalizeCompanyTags(pack.specialties);
+}
 const invite = {
   invite_id,
   company_code: company.code,
@@ -1851,6 +2014,8 @@ const invite = {
   created_at: now(),
   redeemed_at: null,
   redeemed_by: null,
+  role_pack_id: packId,
+  role_pack_snapshot: snap,
   prompt: null,
 };
 invite.prompt = buildInviteRedeemPrompt(base || "https://teams.vyibc.com", invite);
@@ -1862,10 +2027,10 @@ if (from) {
     to: from,
     from,
     ref: { invite_id, company_code: company.code },
-    body: { role: invite.role, specialties: specs, target_hint: invite.target_hint },
+    body: { role: invite.role, specialties: specs, target_hint: invite.target_hint, role_pack_id: packId, role_pack_name: snap && snap.name },
   });
 }
-this._feedPush(s, company.code, `📨 代企业入驻邀请已创建 ${invite_id}`);
+this._feedPush(s, company.code, `📨 代企业入驻邀请已创建 ${invite_id}${packId ? ` · 角色包 ${snap.name}` : ""}`);
 return { ...invite };
 }
 
@@ -1885,6 +2050,13 @@ const tags = [
   ...(Array.isArray(agentFields && agentFields.tags) ? agentFields.tags : []),
 ];
 const af = agentFields || {};
+let role_pack_id = inv.role_pack_id || null;
+let role_pack_snapshot = inv.role_pack_snapshot || null;
+if (af.role_pack_id) {
+  const pack = resolveRolePack(af.role_pack_id);
+  role_pack_id = pack.id;
+  role_pack_snapshot = snapshotRolePack(pack);
+}
 const registered = this._register(s, {
   name: af.name,
   tags,
@@ -1894,6 +2066,8 @@ const registered = this._register(s, {
   company_code: inv.company_code,
   muse_account: af.muse_account,
   muse_session: af.muse_session,
+  role_pack_id,
+  role_pack_snapshot,
   // deliberately omit invite_id to avoid re-entrancy with _register invite branch
 });
 inv.status = "redeemed";
@@ -1904,6 +2078,7 @@ const ackBody = {
   doorplate: registered.doorplate,
   name: registered.name,
   company_code: inv.company_code,
+  role_pack_id,
 };
 if (inv.from) {
   this._pushReceipt(s, {
@@ -1917,19 +2092,19 @@ if (inv.from) {
 } else {
   this._notifyCompanyLeads(s, inv.company_code, "invite_ack", registered.doorplate, { invite_id }, ackBody);
 }
-this._feedPush(s, inv.company_code, `✅ 邀请 ${invite_id} 已兑付：${registered.doorplate} 入职`);
+this._feedPush(s, inv.company_code, `✅ 邀请 ${invite_id} 已兑付：${registered.doorplate} 入职${role_pack_id ? ` · ${role_pack_snapshot && role_pack_snapshot.name}` : ""}`);
 return { agent: registered, invite: { ...inv } };
 }
 
 // ---------- agents ----------
-_register(s, { name, tags, model, avatar, role, company_code, company_name, invite_id, muse_account, muse_session}) {
+_register(s, { name, tags, model, avatar, role, company_code, company_name, invite_id, muse_account, muse_session, role_pack_id, role_pack_snapshot}) {
 // 代企业入驻：带 invite_id 时走兑付（企业感知入职）
 if (invite_id) {
   const inv = s.invites && s.invites[invite_id];
   if (!inv) throw new HttpError(404, `unknown invite: ${invite_id}`);
   if (inv.status !== "pending") throw new HttpError(409, `invite ${invite_id} already ${inv.status}`);
   // Prevent re-entrancy: redeem calls _register without invite_id
-  const fields = { name, tags, model, avatar, role, company_code, muse_account, muse_session };
+  const fields = { name, tags, model, avatar, role, company_code, muse_account, muse_session, role_pack_id, role_pack_snapshot };
   return this._redeemInvite(s, invite_id, fields).agent;
 }
 const preset = role && ROLE_PRESETS[role]? ROLE_PRESETS[role]: null;
@@ -1962,6 +2137,20 @@ const merged = [...new Set([...(preset? preset.tags: []),...(tags || [])])];
 const isFirst = !Object.values(s.agents).some((x) => x.company === company.code);
 const museAcc = muse_account != null ? String(muse_account).trim().slice(0, 128) || null : null;
 const museSess = muse_session != null ? String(muse_session).trim().slice(0, 128) || null : null;
+let packId = role_pack_id ? String(role_pack_id).trim() : null;
+let packSnap = role_pack_snapshot || null;
+if (packId && !packSnap) {
+  const pack = resolveRolePack(packId);
+  packId = pack.id;
+  packSnap = snapshotRolePack(pack);
+} else if (packId && packSnap && !packSnap.id) {
+  packSnap = { ...packSnap, id: packId };
+}
+if (packSnap && packSnap.specialties && packSnap.specialties.length) {
+  for (const t of packSnap.specialties) {
+    if (!merged.includes(t)) merged.push(t);
+  }
+}
 const a = {
 doorplate,
 company: company.code,
@@ -1972,6 +2161,8 @@ tags: merged,
 model: model || null,
 muse_account: museAcc,
 muse_session: museSess,
+role_pack_id: packId || null,
+role_pack_snapshot: packSnap || null,
 last_heartbeat: null,
 current_task: null,
 created_at: now(),
@@ -2454,7 +2645,8 @@ company_code: { type: "string", description: "Company code to join, e.g. 'C-7K2Q
 company_name: { type: "string", description: "Company name, used when founding a new company (企业自己入驻/开公司)."},
 invite_id: { type: "string", description: "代企业入驻 invite id from teams_create_invite. When set, joins that company and emits invite_ack (prefer teams_redeem_invite)."},
 muse_account: { type: "string", description: "Required in practice: current logged-in Muse account (email or account label). Stored on the agent so ops can map doorplate→Muse. Pass together with muse_session."},
-muse_session: { type: "string", description: "Required in practice: this side-chat / Muse session name (旁聊会话名). Stored with muse_account for doorplate ownership lookup."}
+muse_session: { type: "string", description: "Required in practice: this side-chat / Muse session name (旁聊会话名). Stored with muse_account for doorplate ownership lookup."},
+role_pack_id: { type: "string", description: "Optional employee role pack id (plaza MCP/skill refs). Prefer setting on invite; redeem copies pack snapshot to agent."}
 },
 required: ["name"]
 }
@@ -2684,7 +2876,7 @@ required: ["doorplate", "company_code"]
 },
 {
 name: "teams_create_invite",
-description: "代企业入驻：创建 pending invite + 入驻提示词。Does NOT deliver to Muse Linux (use channel invite-mcp for deliver). On redeem, Teams emits invite_ack receipt. Keywords: invite, proxy-onboard, 代企业入驻, 邀请.",
+description: "代企业入驻：创建 pending invite + 入驻提示词。Pass role_pack_id to bind a plaza role pack (指令×3 + MCP/skill). Does NOT deliver (use invite-mcp). On redeem, Teams emits invite_ack. Keywords: invite, proxy-onboard, role_pack, 代企业入驻, 邀请, 角色包.",
 inputSchema: {
 type: "object",
 properties: {
@@ -2694,14 +2886,15 @@ role: { type: "string"},
 specialties: { type: "array", items: { type: "string"}, description: "e.g. [\"video_gen\",\"edit\"]"},
 tags: { type: "array", items: { type: "string"}},
 target_hint: { type: "string", description: "Optional channel target hint"},
-note: { type: "string"}
+note: { type: "string"},
+role_pack_id: { type: "string", description: "Role pack id from teams_list_role_packs, e.g. video_gen_worker | editor"}
 },
 required: ["company_code"]
 }
 },
 {
 name: "teams_redeem_invite",
-description: "Redeem a proxy-onboard invite_id: register into the invited company and emit invite_ack. 兑付代企业入驻邀请. Always pass muse_account + muse_session (login account + side-chat name). Keywords: redeem, join via invite, 兑付, 入职.",
+description: "Redeem a proxy-onboard invite_id: register into the invited company and emit invite_ack. 兑付代企业入驻邀请. Always pass muse_account + muse_session. Invite's role_pack_id/snapshot is stamped on the agent. Keywords: redeem, join via invite, role_pack, 兑付, 入职.",
 inputSchema: {
 type: "object",
 properties: {
@@ -2711,10 +2904,16 @@ avatar: { type: "string"},
 tags: { type: "array", items: { type: "string"}},
 role: { type: "string"},
 muse_account: { type: "string", description: "Current Muse login account (email/label). Stored for doorplate ownership."},
-muse_session: { type: "string", description: "Side-chat / Muse session name for this worker."}
+muse_session: { type: "string", description: "Side-chat / Muse session name for this worker."},
+role_pack_id: { type: "string", description: "Optional override pack id; default comes from the invite"}
 },
 required: ["invite_id", "name"]
 }
+},
+{
+name: "teams_list_role_packs",
+description: "List employee role packs: plaza MCP/skill refs + 三份指令元数据（主聊/旁聊调度/干活执行）. Plaza https://fleet.vyibc.com/api/hub/registry is source of truth; Teams only stores refs + snapshots on invite/agent. Keywords: role pack, 角色包, 能力广场, plaza.",
+inputSchema: { type: "object", properties: {} }
 },
 {
 name: "teams_company_suspend",
@@ -2789,6 +2988,7 @@ case "teams_list_companies": return { companies: this._listCompanies(s) };
 case "teams_company_create": return this._createCompany(s, a);
 case "teams_update_company": return this._updateCompany(s, a.company_code, a, a.from);
 case "teams_list_receipts": return this._listReceipts(s, a);
+case "teams_list_role_packs": return { packs: listRolePacks(), plaza_source_of_truth: PLAZA_REGISTRY_URL };
 case "teams_create_invite": return this._createInvite(s, a, "https://teams.vyibc.com");
 case "teams_redeem_invite": return this._redeemInvite(s, a.invite_id, a);
 case "teams_company_suspend": return this._suspendCompany(s, a.company_code, a.from, "https://teams.vyibc.com");
@@ -3036,6 +3236,10 @@ return json(this._listReceipts(s, {
 if (method === "POST" && r.length === 3 && r[0] === "receipts" && r[2] === "read")
 return json(this._markReceiptRead(s, r[1], body.doorplate, body.company_code));
 
+// GET /api/role-packs
+if (method === "GET" && r.length === 1 && r[0] === "role-packs")
+return json({ packs: listRolePacks(), plaza_source_of_truth: PLAZA_REGISTRY_URL });
+
 // POST /api/invites — 代企业入驻：创建邀请（不投递渠道）
 if (method === "POST" && r.length === 1 && r[0] === "invites") {
   const base = `${url.protocol}//${url.host}`;
@@ -3258,6 +3462,8 @@ if (body && body.method === "tools/call" && body.params && EDGE_NEW_TOOLS.some((
         unread_only: !!args.unread_only,
         mark_read: !!args.mark_read,
       });
+    } else if (name === "teams_list_role_packs") {
+      out = { packs: listRolePacks(), plaza_source_of_truth: PLAZA_REGISTRY_URL };
     } else if (name === "teams_create_invite") {
       out = await edgeCreateInvite(env.DB, args, base);
     } else if (name === "teams_redeem_invite") {
@@ -3607,6 +3813,9 @@ try {
   }
 
   // Invites
+  if (url.pathname === "/api/role-packs" && method === "GET") {
+    return json({ packs: listRolePacks(), plaza_source_of_truth: PLAZA_REGISTRY_URL });
+  }
   if (url.pathname === "/api/invites" && method === "POST") {
     let body = null;
     try { body = await request.json(); } catch (_) { body = {}; }

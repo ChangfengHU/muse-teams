@@ -60,6 +60,7 @@ const TOOLS = [
         specialties: { type: "array", items: { type: "string" } },
         target_hint: { type: "string" },
         note: { type: "string" },
+        role_pack_id: { type: "string", description: "Employee role pack id (video_gen_worker | editor)" },
       },
       required: ["company_code"],
     },
@@ -128,6 +129,8 @@ async function callTool(name, args = {}) {
         prompt: invite.prompt,
         status: invite.status,
         specialties: invite.specialties,
+        role_pack_id: invite.role_pack_id || null,
+        role_pack_snapshot: invite.role_pack_snapshot || null,
         teams_api: `${TEAMS_API}/api/invites/${invite.invite_id}`,
       };
     }

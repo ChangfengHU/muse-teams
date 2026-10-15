@@ -47,6 +47,26 @@ muse-teams/
 - **代企业入驻**：`teams_create_invite` → 渠道 MCP 投递提示词 → `teams_redeem_invite` → `invite_ack` 回执
 - 渠道投递见 [`invite-mcp/`](invite-mcp/)（与通用 Teams MCP 分离）
 
+## 员工角色包（role_pack）
+
+能力广场（`https://fleet.vyibc.com/api/hub/registry`）是 MCP / Skill 的事实来源。Teams **不另起能力库**，只维护员工角色包引用：
+
+- 包结构：三份指令元数据（主聊 / 旁聊调度 / 干活执行）+ `mcp:…` 集合 + `skill:…` 集合
+- 邀请时传 `role_pack_id`；Teams 在 invite + 兑付后门牌上存 `role_pack_id` + `role_pack_snapshot`
+- 投递词只带包名/职责，不塞指令全文
+- 样例包：`video_gen_worker`、`editor`
+
+```bash
+# 列包
+curl -s https://teams.vyibc.com/api/role-packs
+# 或 MCP teams_list_role_packs
+
+# 邀请时绑定角色包
+# invite_compose / teams_create_invite({ company_code, role_pack_id: "video_gen_worker", from })
+```
+
+
+
 公司列表带 **简介 `intro`** + **擅长标签 `tags`**（如 `video_gen` / `edit`）。
 
 

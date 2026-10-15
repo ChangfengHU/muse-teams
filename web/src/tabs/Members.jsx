@@ -55,6 +55,23 @@ function EmployeeCard({ agent, leadDoorplate, companyCode, onDeleted }) {
             {agent.muse_session && <span>💬 {agent.muse_session}</span>}
           </div>
         )}
+        {(agent.role_pack_id || (agent.role_pack_snapshot && agent.role_pack_snapshot.name)) && (
+          <div
+            className="emp-pack"
+            title={[
+              agent.role_pack_snapshot && agent.role_pack_snapshot.duty,
+              agent.role_pack_snapshot && Array.isArray(agent.role_pack_snapshot.mcps)
+                ? `MCP: ${agent.role_pack_snapshot.mcps.join(', ')}`
+                : '',
+              agent.role_pack_snapshot && Array.isArray(agent.role_pack_snapshot.skills)
+                ? `Skills: ${agent.role_pack_snapshot.skills.join(', ')}`
+                : '',
+            ].filter(Boolean).join('\n')}
+          >
+            🧰 {(agent.role_pack_snapshot && agent.role_pack_snapshot.name) || agent.role_pack_id}
+            {agent.role_pack_id ? <span className="emp-pack-id"> · {agent.role_pack_id}</span> : null}
+          </div>
+        )}
         <div className="emp-status">
           <span className={`st-light ${st === 'busy' ? 'busy' : st}`} />
           {statusLabel(st)}

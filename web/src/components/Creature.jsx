@@ -69,7 +69,7 @@ const Creature = forwardRef(function Creature(
       ref={setRefs}
       className={`mt-creature ${cls}${sizeCls}${embedCls}`}
       data-doorplate={agent.doorplate}
-      title={[agent.doorplate, agent.muse_account && `账号 ${agent.muse_account}`, agent.muse_session && `旁聊 ${agent.muse_session}`].filter(Boolean).join(' · ')}
+      title={[agent.doorplate, agent.muse_account && `账号 ${agent.muse_account}`, agent.muse_session && `旁聊 ${agent.muse_session}`, (agent.role_pack_snapshot && agent.role_pack_snapshot.name) || agent.role_pack_id].filter(Boolean).join(' · ')}
       style={posStyle}
       onClick={() => setBubbleOpen((v) => !v)}
     >
@@ -117,6 +117,11 @@ function Bubble({ open, agent, stTxt, onSendMsg, onOpenMailbox, onClose }) {
       </div>
       <div className="cb-row">🏷️ 标签：<b>{(agent.tags || []).join(' · ') || '无'}</b></div>
       <div className="cb-row">👤 Muse 账号：<b>{agent.muse_account || '未登记'}</b></div>
+      {(agent.role_pack_id || (agent.role_pack_snapshot && agent.role_pack_snapshot.name)) && (
+        <div className="cb-row">🧰 角色包：<b>{(agent.role_pack_snapshot && agent.role_pack_snapshot.name) || agent.role_pack_id}</b>
+          {agent.role_pack_snapshot && agent.role_pack_snapshot.duty ? ` — ${agent.role_pack_snapshot.duty}` : ''}
+        </div>
+      )}
       <div className="cb-row">💬 旁聊会话：<b>{agent.muse_session || '未登记'}</b></div>
       <div className="cb-row">📌 当前任务：<b>{agent.current_task || '无'}</b></div>
       <div className="cb-row">💓 上次心跳：<b>{heartbeatLabel(agent.last_heartbeat)}</b>{isAgentDormant(st) ? ' · 休眠员工（>180s 无心跳）' : ''}</div>

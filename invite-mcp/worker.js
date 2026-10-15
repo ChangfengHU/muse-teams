@@ -156,7 +156,7 @@ const TOOLS = [
   {
     name: "invite_compose",
     description:
-      "Create a Teams proxy-onboard invite (teams_create_invite) and return invite_id + prompt text. Does not deliver.",
+      "Create a Teams proxy-onboard invite (teams_create_invite) and return invite_id + prompt text. Pass role_pack_id to bind a plaza employee role pack. Does not deliver.",
     inputSchema: {
       type: "object",
       properties: {
@@ -166,6 +166,10 @@ const TOOLS = [
         specialties: { type: "array", items: { type: "string" } },
         target_hint: { type: "string" },
         note: { type: "string" },
+        role_pack_id: {
+          type: "string",
+          description: "Employee role pack id from teams_list_role_packs (e.g. video_gen_worker | editor). Plaza MCP/skill refs + 3 instruction metas.",
+        },
       },
       required: ["company_code"],
     },
@@ -489,6 +493,8 @@ async function callTool(env, name, args = {}) {
         prompt: invite.prompt,
         status: invite.status,
         specialties: invite.specialties,
+        role_pack_id: invite.role_pack_id || null,
+        role_pack_snapshot: invite.role_pack_snapshot || null,
         kind: "invite",
         teams_api: `${TEAMS_API}/api/invites/${invite.invite_id}`,
       };
