@@ -9,11 +9,12 @@ import { relTime, heartbeatLabel } from '../api.js';
 export const HEARTBEAT_TTL_MS = 180_000;
 export function agentStatus(a) {
   if (!a) return 'dormant';
-  if (a.status === 'online' || a.status === 'busy' || a.status === 'dormant') return a.status;
-  if (a.status === 'offline') return 'dormant';
+  // Always derive from heartbeat TTL — never trust a stale status==="online" for 等候抢单
+  if (a.status === 'dormant' || a.status === 'offline') return 'dormant';
   const last = a.last_heartbeat || 0;
   if (!last || Date.now() - last > HEARTBEAT_TTL_MS) return 'dormant';
-  return a.current_task ? 'busy' : 'online';
+  if (a.status === 'busy' || a.current_task) return 'busy';
+  return 'online';
 }
 export function isAgentDormant(stOrAgent) {
   const st = typeof stOrAgent === 'string' ? stOrAgent : agentStatus(stOrAgent);

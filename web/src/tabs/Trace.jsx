@@ -11,6 +11,23 @@ const STAGE_META = {
   reviewed: { icon: '✅', hint: '验收结案' },
 };
 
+/** Prefer IntelliUI timeline/v1 events when API/MCP attached them; else map stages. */
+function eventsFromTrace(data) {
+  const iu = data && data.intelliui;
+  if (iu && iu.schema === 'intelliui/timeline/v1' && Array.isArray(iu.events) && iu.events.length) {
+    return iu.events.map((e) => ({
+      stage: e.id,
+      label: e.label,
+      at: e.ts,
+      actor: e.actor,
+      payload: e.detail || {},
+      _iu_status: e.status,
+      _iu_duration_ms: e.duration_ms,
+    }));
+  }
+  return data?.stages || [];
+}
+
 /** Map durations_ms keys → stage-pair labels (Chinese). */
 const DUR_ROWS = [
   { k: 'pending_to_claim', label: '发单 → 抢单', from: 'created', to: 'claimed' },
@@ -191,7 +208,7 @@ export default function Trace({ company, onToast, initialTaskId }) {
     return meta.label || data.status;
   }, [data]);
 
-  const stages = data?.stages || [];
+  const stages = eventsFromTrace(data);
 
   return (
     <div className="mt-tabpane trace-pane">
@@ -238,7 +255,7 @@ export default function Trace({ company, onToast, initialTaskId }) {
         <div className="trace-card">
           <div className="trace-head">
             <div>
-              <div className="trace-id">{data.task_id}</div>
+              <div className="trace-id">{data.task_id}{data.intelliui ? <span className="trace-iu-badge" title="intelliui/timeline/v1"> IntelliUI</span> : null}</div>
               <div className="trace-title serif">{data.title}</div>
               <div className="trace-subline">
                 <span className="st-badge">{statusLabel}</span>

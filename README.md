@@ -48,3 +48,31 @@ muse-teams/
 - 渠道投递见 [`invite-mcp/`](invite-mcp/)（与通用 Teams MCP 分离）
 
 公司列表带 **简介 `intro`** + **擅长标签 `tags`**（如 `video_gen` / `edit`）。
+
+
+## IntelliUI timeline（`teams_task_trace`）
+
+仓库 / Notion 未找到既有 IntelliUI 协议，因此落地最小兼容约定 **`intelliui/timeline/v1`**：
+
+- API `GET /api/tasks/:id/trace` 与 MCP `teams_task_trace` 的 JSON 根上带 `intelliui`
+- MCP `content` 另附一块 `{ "type": "intelliui/timeline", "timeline": … }`；兼容客户端可读 `structuredContent.intelliui`
+- 事件字段：`id`, `ts`, `label`, `status`（`done`|`pending`|`rejected`|`live`）, `duration_ms`（到下一事件）, `actor`, `detail`
+- Pages「一单链路」优先用 `intelliui.events` 渲染，缺省回退 `stages`
+
+示例：
+
+```json
+{
+  "schema": "intelliui/timeline/v1",
+  "kind": "timeline",
+  "title": "T-1022 · …",
+  "events": [
+    { "id": "created", "ts": 1710000000000, "label": "发单", "status": "done", "duration_ms": 1200, "actor": null, "detail": {} }
+  ],
+  "summary": { "durations_ms": {}, "company": "C-XXXX", "task_type": "video_gen" }
+}
+```
+
+## 空花名册鉴权
+
+`teams_company_suspend` / `resume` / `archive`（及对应 HTTP）在公司 **尚无任何成员** 时一律 **403**，不再接受任意 `from` 当 operator。须先 `register` 出 lead。

@@ -246,7 +246,7 @@ function buildTaskTraceFromPub(t) {
   ];
   const ms = (a, b) => (a != null && b != null && b >= a) ? (b - a) : null;
   const endAt = t.done_at || t.reviewed_at || null;
-  return {
+  return attachIntelliUi({
     task_id: t.id,
     task_type: t.task_type || "general",
     title: t.title,
@@ -264,12 +264,71 @@ function buildTaskTraceFromPub(t) {
       submit_to_done: ms(submittedAt, endAt),
       total: ms(createdAt, endAt),
     },
+  });
+}
+
+
+/** IntelliUI timeline/v1 — minimal Muse/MCP-friendly rich timeline (no external IntelliUI schema found in-repo/Notion).
+ *  MCP clients that understand type "intelliui/timeline" can render; others ignore and use text JSON.
+ *  Events: id, ts, label, status (done|pending|rejected|live), duration_ms (into next), actor, detail.
+ */
+function buildIntelliUiTimeline(trace) {
+  if (!trace || !Array.isArray(trace.stages)) return null;
+  const durations = trace.durations_ms || {};
+  const edgeKey = {
+    'created->claimed': 'pending_to_claim',
+    'plaza->claimed': 'pending_to_claim',
+    'claimed->submitted': 'claim_to_submit',
+    'submitted->reviewed': 'submit_to_done',
   };
+  const events = trace.stages.map((s, i, arr) => {
+    const next = arr[i + 1];
+    let status = 'pending';
+    if (s.at != null) status = 'done';
+    if (s.stage === 'reviewed' && s.payload && s.payload.approved === false) status = 'rejected';
+    if (s.at == null && i > 0 && arr[i - 1] && arr[i - 1].at != null) status = 'live';
+    let duration_ms = null;
+    if (next) {
+      const k = edgeKey[`${s.stage}->${next.stage}`];
+      if (k && durations[k] != null) duration_ms = durations[k];
+      else if (s.at != null && next.at != null) duration_ms = Math.max(0, next.at - s.at);
+    }
+    return {
+      id: s.stage,
+      ts: s.at != null ? s.at : null,
+      label: s.label || s.stage,
+      status,
+      duration_ms,
+      actor: s.actor || null,
+      detail: s.payload && Object.keys(s.payload).length ? s.payload : null,
+    };
+  });
+  return {
+    schema: 'intelliui/timeline/v1',
+    kind: 'timeline',
+    title: `${trace.task_id || ''} · ${trace.title || ''}`.trim(),
+    subtitle: trace.status || null,
+    task_id: trace.task_id || null,
+    events,
+    summary: {
+      durations_ms: durations,
+      company: trace.company || null,
+      claim_company: trace.claim_company || null,
+      task_type: trace.task_type || null,
+    },
+  };
+}
+
+function attachIntelliUi(trace) {
+  if (!trace) return trace;
+  const intelliui = buildIntelliUiTimeline(trace);
+  if (intelliui) trace.intelliui = intelliui;
+  return trace;
 }
 
 const TASK_TRACE_TOOL = {
   name: "teams_task_trace",
-  description: "One-order lifecycle chain: created → plaza → claimed → submitted → reviewed. 一单链路追溯。Returns stages with timestamps/actors and durations_ms. Keywords: trace, timeline, chain, lifecycle, 链路, 追溯, 时间线.",
+  description: "One-order lifecycle chain: created → plaza → claimed → submitted → reviewed. 一单链路追溯。Returns stages + intelliui/timeline/v1 (events with ts/label/status/duration_ms). Keywords: trace, timeline, chain, lifecycle, IntelliUI, 链路, 追溯, 时间线.",
   inputSchema: {
     type: "object",
     properties: {
@@ -991,7 +1050,7 @@ async function edgeAssertCompanyActive(db, code, verb) {
   return row;
 }
 
-/** Lead auth for edge lifecycle. Missing from → 403. Empty roster: from recorded as operator. */
+/** Lead auth for edge lifecycle. Missing from → 403. Empty roster → 403 (no anonymous operator). */
 async function edgeRequireLead(db, code, from) {
   if (!from || !String(from).trim()) {
     throw new HttpError(403, "需要 from（本公司 lead 门牌号）");
@@ -1002,7 +1061,7 @@ async function edgeRequireLead(db, code, from) {
     String(code).trim().toUpperCase()
   );
   if (!agents.length) {
-    return { doorplate, role: "operator", empty: true };
+    throw new HttpError(403, "公司暂无成员，无法做生命周期操作；请先 register 首位员工成为 lead，再 suspend/resume/archive");
   }
   const lead = agents.find((a) => a.role === "lead") || agents[0];
   if (doorplate !== lead.doorplate) {
@@ -1320,13 +1379,13 @@ if (!lead) throw new HttpError(400, `公司 ${company} 暂无成员`);
 return lead;
 }
 
-// 校验 from 是本公司的 lead。缺 from / 非 lead → 403。空公司壳允许 from 作为 operator 审计标记。
+// 校验 from 是本公司的 lead。缺 from / 非 lead / 空花名册 → 403（禁止任意 from 当 operator）。
 _requireLead(s, from, company_code) {
 const company = this._requireCompanyCode(s, company_code);
 if (!from || !String(from).trim()) throw new HttpError(403, "需要 from（本公司 lead 门牌号）");
 const members = Object.values(s.agents || {}).filter((a) => a.company === company);
 if (!members.length) {
-  return { doorplate: String(from).trim(), company, role: "operator", empty: true };
+  throw new HttpError(403, "公司暂无成员，无法做生命周期操作；请先 register 首位员工成为 lead，再 suspend/resume/archive");
 }
 const f = this._requireAgent(s, from);
 if (f.company !== company) throw new HttpError(403, "只能由本公司 lead 发起");
@@ -2695,7 +2754,7 @@ required: ["company_code", "from"]
 },
 {
 name: "teams_task_trace",
-description: "One-order lifecycle chain: created → plaza → claimed → submitted → reviewed. 一单链路追溯。Returns stages with timestamps/actors and durations_ms. Also includes delivery（交付包）envelope when result present. Keywords: trace, timeline, chain, lifecycle, 链路, 追溯, 时间线.",
+description: "One-order lifecycle chain: created → plaza → claimed → submitted → reviewed. 一单链路追溯。Returns stages + intelliui/timeline/v1 + delivery envelope. Keywords: trace, timeline, chain, lifecycle, IntelliUI, 链路, 追溯, 时间线.",
 inputSchema: {
 type: "object",
 properties: {
@@ -2758,7 +2817,14 @@ if (method === "tools/list") return ok({ tools: this._mcpTools() });
 if (method === "tools/call") {
 const p = (body && body.params) || {};
 const out = this._mcpCall(s, p.name, p.arguments || {});
-return ok({ content: [{ type: "text", text: JSON.stringify(out) }]});
+const content = [{ type: "text", text: JSON.stringify(out) }];
+if (out && out.intelliui) {
+  content.push({ type: "intelliui/timeline", timeline: out.intelliui });
+}
+return ok({
+  content,
+  ...(out && out.intelliui ? { structuredContent: { intelliui: out.intelliui } } : {}),
+});
 }
 return err(-32601, `unknown method: ${method}`);
 } catch (e) {
@@ -3140,10 +3206,14 @@ if (!tres.ok) {
 return json({ jsonrpc: "2.0", id: rpcId, error: { code: -32602, message: (task && task.error) || `unknown task: ${taskId}` } });
 }
 const trace = buildTaskTraceFromPub(task);
+const content = [{ type: "text", text: JSON.stringify(trace) }];
+if (trace && trace.intelliui) {
+  content.push({ type: "intelliui/timeline", timeline: trace.intelliui });
+}
 return json({
 jsonrpc: "2.0",
 id: rpcId,
-result: { content: [{ type: "text", text: JSON.stringify(trace) }] },
+result: { content, structuredContent: trace && trace.intelliui ? { intelliui: trace.intelliui } : undefined },
 });
 }
 // Edge MCP handlers for sticky-DO new tools

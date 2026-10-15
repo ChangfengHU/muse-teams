@@ -375,11 +375,97 @@ function getLog() {
   return globalThis.__inviteDeliveryLog;
 }
 
+const DELIVERY_TTL_SEC = 60 * 60 * 24 * 30; // 30d
+const IDX_CAP = 200;
+
+async function kvPutJson(kv, key, value, ttl = DELIVERY_TTL_SEC) {
+  if (!kv) return;
+  await kv.put(key, JSON.stringify(value), { expirationTtl: ttl });
+}
+
+async function kvGetJson(kv, key) {
+  if (!kv) return null;
+  const raw = await kv.get(key);
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch (_) { return null; }
+}
+
+async function kvPushIndex(kv, indexKey, deliveryId) {
+  if (!kv || !deliveryId) return;
+  let ids = (await kvGetJson(kv, indexKey)) || [];
+  if (!Array.isArray(ids)) ids = [];
+  ids = [deliveryId, ...ids.filter((x) => x !== deliveryId)].slice(0, IDX_CAP);
+  await kvPutJson(kv, indexKey, ids);
+}
+
+/** Persist delivery record to KV (survives Worker restart). Memory Map is warm cache only. */
+async function saveDelivery(env, record) {
+  const mem = getLog();
+  mem.set(record.delivery_id, record);
+  const kv = env && env.DELIVERY_LOG;
+  if (!kv) return record;
+  try {
+    await kvPutJson(kv, `d:${record.delivery_id}`, record);
+    if (record.invite_id) await kvPushIndex(kv, `idx:invite:${record.invite_id}`, record.delivery_id);
+    if (record.company_code) {
+      await kvPushIndex(kv, `idx:company:${String(record.company_code).toUpperCase()}`, record.delivery_id);
+    }
+  } catch (e) {
+    record.persist_error = e.message || String(e);
+  }
+  return record;
+}
+
+async function loadDelivery(env, deliveryId) {
+  if (!deliveryId) return null;
+  const mem = getLog();
+  if (mem.has(deliveryId)) return mem.get(deliveryId);
+  const kv = env && env.DELIVERY_LOG;
+  const row = await kvGetJson(kv, `d:${deliveryId}`);
+  if (row) mem.set(deliveryId, row);
+  return row;
+}
+
+async function listDeliveries(env, { invite_id, company_code } = {}) {
+  const mem = getLog();
+  const kv = env && env.DELIVERY_LOG;
+  let ids = null;
+  if (kv && invite_id) {
+    ids = (await kvGetJson(kv, `idx:invite:${invite_id}`)) || [];
+  } else if (kv && company_code) {
+    ids = (await kvGetJson(kv, `idx:company:${String(company_code).toUpperCase()}`)) || [];
+  }
+  if (ids && ids.length) {
+    const out = [];
+    for (const id of ids) {
+      const row = await loadDelivery(env, id);
+      if (row) out.push(row);
+    }
+    return out;
+  }
+  // Fallback: memory only (or unfiltered dump)
+  let hits = [...mem.values()];
+  if (invite_id) hits = hits.filter((r) => r.invite_id === invite_id);
+  if (company_code) {
+    const c = String(company_code).toUpperCase();
+    hits = hits.filter((r) => (r.company_code || "").toUpperCase() === c);
+  }
+  // Last-resort KV list by prefix (bounded)
+  if (kv && !hits.length && !invite_id && !company_code) {
+    try {
+      const listed = await kv.list({ prefix: "d:", limit: 100 });
+      for (const k of listed.keys || []) {
+        const row = await loadDelivery(env, String(k.name).replace(/^d:/, ""));
+        if (row) hits.push(row);
+      }
+    } catch (_) { /* ignore */ }
+  }
+  return hits;
+}
+
 async function callTool(env, name, args = {}) {
   const TEAMS_API = env.TEAMS_API_URL || TEAMS_API_DEFAULT;
   const TEAMS_MCP = env.TEAMS_MCP_URL || TEAMS_MCP_DEFAULT;
-  const deliveryLog = getLog();
-
   switch (name) {
     case "invite_list_targets": {
       const { targets, source, fleet_error } = await loadTargets(env);
@@ -502,18 +588,24 @@ async function callTool(env, name, args = {}) {
         inject_detail,
         note,
       };
-      deliveryLog.set(delivery_id, record);
+      await saveDelivery(env, record);
       return record;
     }
     case "invite_status": {
-      if (args.delivery_id && deliveryLog.has(args.delivery_id)) return deliveryLog.get(args.delivery_id);
-      let hits = [...deliveryLog.values()];
-      if (args.invite_id) hits = hits.filter((r) => r.invite_id === args.invite_id);
-      if (args.company_code) {
-        const c = String(args.company_code).toUpperCase();
-        hits = hits.filter((r) => (r.company_code || "").toUpperCase() === c);
+      if (args.delivery_id) {
+        const one = await loadDelivery(env, args.delivery_id);
+        if (one) return one;
       }
-      return { invite_id: args.invite_id || null, company_code: args.company_code || null, deliveries: hits };
+      const hits = await listDeliveries(env, {
+        invite_id: args.invite_id || null,
+        company_code: args.company_code || null,
+      });
+      return {
+        invite_id: args.invite_id || null,
+        company_code: args.company_code || null,
+        deliveries: hits,
+        persisted: !!(env && env.DELIVERY_LOG),
+      };
     }
     case "invite_ack_poll": {
       const data = await teamsListReceipts(TEAMS_API, {

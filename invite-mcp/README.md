@@ -42,6 +42,10 @@
 2. `invite_deliver` → `POST {serviceBase}/browser/run` + `Authorization: Bearer IMGGEN_TOKEN`，actions = goto muse.ai → type composer → eval Enter
 3. **不用** `/generate`（会前缀 Create an image 并等图）
 
+## 投递日志持久化
+
+`invite_deliver` / `invite_status` 写入 Cloudflare **KV** binding `DELIVERY_LOG`（`d:<delivery_id>` + invite/company 索引）。Worker 重启不丢；内存 Map 仅作热缓存。
+
 ## 部署
 
 ```bash

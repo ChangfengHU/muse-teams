@@ -117,10 +117,10 @@ export default function LivingRoom({
   /* ---- 抢单（本窝在线员工；跨公司 claim 由后端放开） ---- */
   const grabClick = (e, taskId) => {
     e.stopPropagation();
-    const avail = agents.filter((a) => !isAgentDormant(a));
-    const list = avail.length ? avail : agents;
+    // 仅在线/忙碌可抢；休眠员工绝不当「谁去叼」候选
+    const list = agents.filter((a) => !isAgentDormant(a) && (agentStatus(a) === 'online' || agentStatus(a) === 'busy'));
     if (!list.length) {
-      onToast('本窝还没人，先去「邀请小伙伴」', true);
+      onToast(agents.length ? '本窝没人在线（休眠员工不能抢单），等调度器心跳或手动续约' : '本窝还没人，先去「邀请小伙伴」', true);
       return;
     }
     setPicker({
