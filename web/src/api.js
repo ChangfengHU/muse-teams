@@ -118,10 +118,10 @@ createTask: ({ title, desc, priority, task_type, prompts, acceptance }) =>
     ...(acceptance != null ? { acceptance } : {}),
     company_code: needCompany(),
   }),
-/** 手动发「视频生成」单：prompts 为数组或换行分隔字符串 */
+/** 手动发「视频生成」单：prompts 为数组或换行分隔字符串；title 可空由服务端按提示词生成 */
 createVideoGenTask: ({ title, prompts, priority, desc, acceptance }) =>
   request('/api/tasks', 'POST', {
-    title,
+    ...(title && String(title).trim() ? { title: String(title).trim() } : {}),
     prompts,
     priority: priority || 'P1',
     task_type: 'video_gen',

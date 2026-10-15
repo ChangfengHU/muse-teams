@@ -27,20 +27,43 @@ function companyHue(code) {
   return `hsl(${h % 360} 42% 92%)`;
 }
 
+
+function defaultVideoTitle(promptsText) {
+  const lines = String(promptsText || '')
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const n = lines.length;
+  const d = new Date();
+  const date = `${d.getMonth() + 1}/${d.getDate()}`;
+  if (!n) return `视频生成 · ${date}`;
+  const first = lines[0].slice(0, 24);
+  if (n === 1) return `视频生成 · ${first}`;
+  return `视频生成 · ${first} · ${n} 条`;
+}
+
 function CreateVideoModal({ show, onClose, onCreated, toast }) {
   const [title, setTitle] = useState('');
   const [prompts, setPrompts] = useState('');
   const [pri, setPri] = useState('P1');
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!show) return;
+    setTitle(defaultVideoTitle(''));
+    setPrompts('');
+    setPri('P1');
+  }, [show]);
+
   if (!show) return null;
 
   const submit = async () => {
-    if (!title.trim()) { toast('先填标题', true); return; }
     if (!prompts.trim()) { toast('至少写一条视频提示词', true); return; }
+    const autoTitle = title.trim() || defaultVideoTitle(prompts);
     setBusy(true);
     try {
       const task = await api.createVideoGenTask({
-        title: title.trim(),
+        title: autoTitle,
         prompts: prompts.trim(),
         priority: pri,
       });
@@ -61,8 +84,12 @@ function CreateVideoModal({ show, onClose, onCreated, toast }) {
         <h2 className="serif">🎬 发视频生成单</h2>
         <div className="msub">提示词交给抢单公司实现；对方交回每条视频的 JSON。剪辑单以后再发。</div>
         <div className="field">
-          <label>标题</label>
-          <input value={title} placeholder="例：品牌短片 · 麦田竖版 3 条" onChange={(e) => setTitle(e.target.value)} />
+          <label>标题（可留空，按提示词自动生成）</label>
+          <input
+            value={title}
+            placeholder="留空则用「视频生成 · 首条提示词 · N 条」"
+            onChange={(e) => setTitle(e.target.value)}
+          />
         </div>
         <div className="field">
           <label>提示词列表（一行一条）</label>

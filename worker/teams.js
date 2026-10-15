@@ -632,6 +632,15 @@ return Object.values(s.agents).filter((a) => a.company === company).map((a) => t
 }
 
 // ---------- tasks ----------
+_defaultVideoTitle(promptList) {
+const n = (promptList || []).length;
+const d = new Date();
+const date = `${d.getMonth() + 1}/${d.getDate()}`;
+if (!n) return `视频生成 · ${date}`;
+const first = String(promptList[0]).slice(0, 24);
+if (n === 1) return `视频生成 · ${first}`;
+return `视频生成 · ${first} · ${n} 条`;
+}
 _normalizePrompts(prompts, desc) {
 if (Array.isArray(prompts)) {
 return prompts.map((p) => String(p == null ? "" : p).trim()).filter(Boolean).slice(0, 50);
@@ -664,8 +673,6 @@ meta: row.meta && typeof row.meta === "object" ? row.meta : {},
 });
 }
 _createTask(s, { title, desc, priority, deps, acceptance, company_code, task_type, prompts}) {
-if (!title ||!String(title).trim())
-throw new HttpError(400, "title is required");
 const company = this._requireCompany(s, company_code).code;
 const pri = (priority || "P1").toUpperCase();
 if (!["P0", "P1", "P2"].includes(pri))
@@ -677,6 +684,11 @@ throw new HttpError(400, "task_type must be general|video_gen|edit");
 let promptList = this._normalizePrompts(prompts, desc);
 if (type === "video_gen" && !promptList.length) {
 throw new HttpError(400, "video_gen tasks require prompts (array or multiline string)");
+}
+let finalTitle = title != null && String(title).trim() ? String(title).trim() : "";
+if (!finalTitle) {
+if (type === "video_gen") finalTitle = this._defaultVideoTitle(promptList);
+else throw new HttpError(400, "title is required");
 }
 let finalDesc = desc || "";
 if (type === "video_gen" && promptList.length) {
@@ -694,7 +706,7 @@ const id = "T-" + s.taskSeq;
 const t = {
 id,
 company,
-title: String(title).slice(0, 200),
+title: String(finalTitle).slice(0, 200),
 desc: finalDesc,
 priority: pri,
 deps: deps || [],
@@ -1025,7 +1037,7 @@ description: "Create a new task in YOUR company's task hall. 给本公司发布�
 inputSchema: {
 type: "object",
 properties: {
-title: { type: "string", description: "Task title (required)"},
+title: { type: "string", description: "Task title. Optional for video_gen (auto from prompts); required for general."},
 desc: { type: "string", description: "Task description"},
 priority: { type: "string", enum: ["P0", "P1", "P2"], description: "Priority, default P1"},
 doorplate: { type: "string", description: "Your doorplate (used to scope to your company)"},
