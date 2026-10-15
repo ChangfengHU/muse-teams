@@ -34,3 +34,17 @@ muse-teams/
 
 公司码是公司级非私密标识：敏感操作缺公司码返回 400，跨公司返回 403；
 删除成员/任务还需本公司 lead 的门牌号。不引入 token。
+
+
+## 架构边界（2026-10-15）
+
+| 通道 | 用途 | 形状 |
+|------|------|------|
+| **交付包**（任务 `result`） | 任务产物，随 `task_type` 变 | `task-delivery/v1` 信封 |
+| **回执箱** | 固定枚举通知（加人/抢单/交单/验收/广播…） | `receipt/v1` |
+
+- **企业自助入驻**：`POST /api/companies` / `teams_company_create` / `teams_register`（不填 invite）
+- **代企业入驻**：`teams_create_invite` → 渠道 MCP 投递提示词 → `teams_redeem_invite` → `invite_ack` 回执
+- 渠道投递见 [`invite-mcp/`](invite-mcp/)（与通用 Teams MCP 分离）
+
+公司列表带 **简介 `intro`** + **擅长标签 `tags`**（如 `video_gen` / `edit`）。

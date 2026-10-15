@@ -12,6 +12,7 @@ import Activity from './tabs/Activity.jsx';
 import Companies from './tabs/Companies.jsx';
 import ClaimPlaza from './tabs/ClaimPlaza.jsx';
 import Trace from './tabs/Trace.jsx';
+import Receipts from './tabs/Receipts.jsx';
 import { agentStatus } from './components/Creature.jsx';
 import { artIcon } from './components/Modals.jsx';
 import { deliverCelebration } from './anim.js';
@@ -27,6 +28,7 @@ const TAB_TO_HASH = {
   arts: 'arts',
   feed: 'feed',
   trace: 'trace',
+  receipts: 'receipts',
 };
 const HASH_TO_TAB = Object.fromEntries(
   Object.entries(TAB_TO_HASH).map(([tab, hash]) => [hash, tab])
@@ -302,6 +304,9 @@ export default function App() {
             <Artifacts tasks={tasks} agents={agents} onOpenArtifact={openArtifact} />
           )}
           {connected && tab === 'feed' && <Activity feed={feed} />}
+          {tab === 'receipts' && (
+            <Receipts agents={agents} onToast={toast} />
+          )}
           {tab === 'trace' && (
             <Trace company={company} onToast={toast} initialTaskId={traceTaskId} />
           )}

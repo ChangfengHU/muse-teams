@@ -10,6 +10,7 @@ const TABS = [
   { key: 'arts', icon: '📦', label: '产物' },
   { key: 'feed', icon: '📻', label: '动态' },
   { key: 'trace', icon: '🔗', label: '链路' },
+  { key: 'receipts', icon: '📬', label: '回执箱' },
 ];
 
 export default function Sidebar({ tab, onSwitch }) {

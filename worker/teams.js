@@ -31,6 +31,25 @@ const COMPANY_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const DEFAULT_COMPANY_CODE = "C-0001";
 const DEFAULT_COMPANY_NAME = "我的公司";
 
+// Receipt box（回执箱）fixed enum — NOT mixed with task delivery package
+const RECEIPT_TYPES = [
+  "invite_sent", "invite_ack", "claim_ok", "submit_ok",
+  "review_pass", "review_reject", "broadcast", "agent_offline", "quota_warn",
+];
+const RECEIPT_LABELS = {
+  invite_sent: "已发出邀请",
+  invite_ack: "邀请已入职",
+  claim_ok: "抢单成功",
+  submit_ok: "已交交付包",
+  review_pass: "验收通过",
+  review_reject: "验收打回",
+  broadcast: "公司广播",
+  agent_offline: "员工掉线",
+  quota_warn: "配额告警",
+};
+const COMPANY_SPECIALTIES = ["video_gen", "edit", "general", "coder", "reviewer", "research", "qa", "zh-writing", "devops"];
+
+
 // Auto company names: adjective + noun (avoid repeating 「毛怪工作室-XXXX」)
 const NAME_ADJECTIVES = [
   "青柠", "琥珀", "星辰", "雾港", "竹风", "暖阳", "银杏", "蜜桃", "松果", "潮汐",
@@ -80,7 +99,9 @@ const D1_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS companies (
   code TEXT PRIMARY KEY,
   name TEXT NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  intro TEXT,
+  tags TEXT
 );
 CREATE TABLE IF NOT EXISTS agents (
   doorplate TEXT NOT NULL,
@@ -107,6 +128,36 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_agents_company ON agents(company_code);
 CREATE INDEX IF NOT EXISTS idx_tasks_company ON tasks(company_code);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(company_code, status);
+CREATE TABLE IF NOT EXISTS invites (
+  invite_id TEXT PRIMARY KEY,
+  company_code TEXT NOT NULL,
+  company_name TEXT,
+  role TEXT,
+  specialties TEXT,
+  from_doorplate TEXT,
+  target_hint TEXT,
+  note TEXT,
+  status TEXT NOT NULL,
+  prompt TEXT,
+  created_at INTEGER,
+  redeemed_at INTEGER,
+  redeemed_by TEXT
+);
+CREATE TABLE IF NOT EXISTS receipts (
+  id TEXT PRIMARY KEY,
+  type TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  company TEXT,
+  "to" TEXT NOT NULL,
+  "from" TEXT,
+  ref TEXT,
+  body TEXT,
+  read INTEGER NOT NULL DEFAULT 0,
+  label TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_receipts_to ON receipts("to", at);
+CREATE INDEX IF NOT EXISTS idx_receipts_type ON receipts("to", type);
+CREATE INDEX IF NOT EXISTS idx_invites_company ON invites(company_code);
 `;
 
 
@@ -193,6 +244,7 @@ function buildTaskTraceFromPub(t) {
     claim_company: t.claim_company || null,
     prompts: Array.isArray(t.prompts) ? t.prompts : [],
     result: t.result != null ? t.result : null,
+    delivery: buildDeliveryEnvelope(t),
     stages,
     durations_ms: {
       pending_to_claim: ms(createdAt, claimedAt),
@@ -222,6 +274,13 @@ async function ensureD1Schema(db) {
   for (const sql of stmts) {
     await db.prepare(sql).run();
   }
+  // Soft migrations for existing DBs
+  for (const sql of [
+    "ALTER TABLE companies ADD COLUMN intro TEXT",
+    "ALTER TABLE companies ADD COLUMN tags TEXT",
+  ]) {
+    try { await db.prepare(sql).run(); } catch (_) { /* column may already exist */ }
+  }
 }
 
 async function syncStateToD1(db, s) {
@@ -241,8 +300,12 @@ async function syncStateToD1(db, s) {
   const batch = [];
   for (const c of companies) {
     batch.push(
-      db.prepare("INSERT INTO companies (code, name, created_at) VALUES (?, ?, ?)").bind(
-        c.code, c.name || c.code, c.created_at || 0
+      db.prepare("INSERT INTO companies (code, name, created_at, intro, tags) VALUES (?, ?, ?, ?, ?)").bind(
+        c.code,
+        c.name || c.code,
+        c.created_at || 0,
+        c.intro || c.blurb || "",
+        JSON.stringify(Array.isArray(c.tags) ? c.tags : (c.specialties || []))
       )
     );
   }
@@ -306,18 +369,375 @@ async function listCompaniesFromD1(db) {
   if (!db) return [];
   await ensureD1Schema(db);
   const { results } = await db.prepare(
-    `SELECT c.code, c.name, c.created_at,
+    `SELECT c.code, c.name, c.created_at, c.intro, c.tags,
             (SELECT COUNT(*) FROM agents a WHERE a.company_code = c.code) AS member_count
      FROM companies c
      ORDER BY c.created_at DESC`
   ).all();
-  return (results || []).map((r) => ({
-    code: r.code,
-    name: r.name,
-    created_at: r.created_at,
-    member_count: Number(r.member_count) || 0,
-  }));
+  return (results || []).map((r) => {
+    let tags = [];
+    try { tags = r.tags ? JSON.parse(r.tags) : []; } catch (_) { tags = []; }
+    if (!Array.isArray(tags)) tags = [];
+    return {
+      code: r.code,
+      name: r.name,
+      created_at: r.created_at,
+      intro: r.intro || "",
+      tags,
+      specialties: tags,
+      member_count: Number(r.member_count) || 0,
+    };
+  });
 }
+
+/** Delivery package（交付包）envelope — field name stays `result` internally. */
+function buildDeliveryEnvelope(t) {
+  if (!t || t.result == null) return null;
+  return {
+    schema: "task-delivery/v1",
+    task_id: t.id,
+    task_type: t.task_type || "general",
+    submitted_at: t.submitted_at || null,
+    payload: t.result,
+  };
+}
+
+function normalizeCompanyTags(raw) {
+  let arr = [];
+  if (Array.isArray(raw)) arr = raw;
+  else if (typeof raw === "string" && raw.trim()) {
+    arr = raw.split(/[,，\s]+/).map((x) => x.trim()).filter(Boolean);
+  }
+  const out = [];
+  const seen = new Set();
+  for (const x of arr) {
+    const v = String(x || "").trim().toLowerCase().slice(0, 32);
+    if (!v || seen.has(v)) continue;
+    seen.add(v);
+    out.push(v);
+    if (out.length >= 12) break;
+  }
+  return out;
+}
+
+function buildInviteRedeemPrompt(base, invite) {
+  const company = invite.company_code;
+  const companyName = invite.company_name || company;
+  const role = invite.role || "";
+  const specs = Array.isArray(invite.specialties) ? invite.specialties : [];
+  const specLine = specs.length ? specs.join(", ") : "video_gen, edit";
+  return `你是 Muse Teams 的 worker agent。这是【代企业入驻邀请】（invite_id=${invite.invite_id}）。
+
+【强制】
+1) 调 teams_redeem_invite（或 teams_register 并带 invite_id），invite_id 必须填 "${invite.invite_id}"。
+2) company_code 必须填 "${company}"（「${companyName}」）。不要创建新公司。
+3) 建议擅长标签 specialties/tags：${specLine}${role ? `；角色 role：${role}` : ""}。
+
+注册示例（MCP）：
+teams_redeem_invite({ invite_id: "${invite.invite_id}", name: "<可爱名字>", avatar: "🦊", tags: ${JSON.stringify(specs.length ? specs : ["video_gen"])} })
+
+或 curl：
+curl -s -X POST ${base}/api/invites/${invite.invite_id}/redeem \\
+  -H 'Content-Type: application/json' \\
+  -d '{"name":"<可爱名字>","avatar":"🦊","tags":${JSON.stringify(specs.length ? specs : ["video_gen"])}}'
+
+成功后告诉用户门牌号，并开始心跳 / 抢单循环（teams_company_renew 或 teams_heartbeat + teams_poll_tasks / teams_claim）。`;
+}
+
+
+async function withTimeout(promise, ms = 2500) {
+  let t;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, rej) => { t = setTimeout(() => rej(new Error("timeout")), ms); }),
+    ]);
+  } finally {
+    if (t) clearTimeout(t);
+  }
+}
+
+// ---------- Edge D1 helpers (DO code can stick; edge keeps 交付包/回执/邀请可用) ----------
+async function d1Run(db, sql, ...binds) {
+  if (!db) return null;
+  await ensureD1Schema(db);
+  return db.prepare(sql).bind(...binds).run();
+}
+async function d1All(db, sql, ...binds) {
+  if (!db) return [];
+  await ensureD1Schema(db);
+  const { results } = await db.prepare(sql).bind(...binds).all();
+  return results || [];
+}
+async function d1First(db, sql, ...binds) {
+  const rows = await d1All(db, sql, ...binds);
+  return rows[0] || null;
+}
+
+async function edgeUpdateCompanyProfile(db, code, { name, intro, tags, specialties }) {
+  if (!db || !code) return null;
+  await ensureD1Schema(db);
+  const tagList = normalizeCompanyTags(tags != null ? tags : specialties);
+  const introVal = intro != null ? String(intro).slice(0, 280) : null;
+  const row = await d1First(db, 'SELECT code, name, created_at, intro, tags FROM companies WHERE code = ?', code);
+  if (!row) return null;
+  const nextIntro = introVal != null ? introVal : (row.intro || '');
+  let nextTags = tagList;
+  if (tags == null && specialties == null) {
+    try { nextTags = row.tags ? JSON.parse(row.tags) : []; } catch (_) { nextTags = []; }
+  }
+  const nextName = name != null && String(name).trim() ? String(name).trim().slice(0, 30) : row.name;
+  await d1Run(db,
+    'UPDATE companies SET name = ?, intro = ?, tags = ? WHERE code = ?',
+    nextName, nextIntro, JSON.stringify(nextTags), code
+  );
+  return {
+    code,
+    name: nextName,
+    created_at: row.created_at,
+    intro: nextIntro,
+    blurb: nextIntro,
+    tags: nextTags,
+    specialties: nextTags,
+  };
+}
+
+let EDGE_RECEIPT_SEQ = 0;
+async function edgePushReceipt(db, { type, company, to, from, ref, body }) {
+  if (!db || !to) return null;
+  if (!RECEIPT_TYPES.includes(type)) throw new HttpError(400, `unknown receipt type: ${type}`);
+  EDGE_RECEIPT_SEQ += 1;
+  const id = `R-E${Date.now()}-${EDGE_RECEIPT_SEQ}`;
+  const at = now();
+  const label = RECEIPT_LABELS[type] || type;
+  await d1Run(db,
+    `INSERT INTO receipts (id, type, at, company, "to", "from", ref, body, read, label)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+    id, type, at, company || null, to, from || null,
+    JSON.stringify(ref || {}), JSON.stringify(body || {}), label
+  );
+  return { schema: 'receipt/v1', id, type, at, company: company || null, to, from: from || null, ref: ref || {}, body: body || {}, read: false, label };
+}
+
+async function edgeListReceipts(db, { doorplate, company, type, unread_only, mark_read }) {
+  if (!doorplate) throw new HttpError(400, 'doorplate required');
+  let sql = `SELECT * FROM receipts WHERE "to" = ?`;
+  const binds = [doorplate];
+  if (company) { sql += ' AND (company = ? OR company IS NULL)'; binds.push(company); }
+  if (type && type !== 'all') { sql += ' AND type = ?'; binds.push(type); }
+  if (unread_only) sql += ' AND read = 0';
+  sql += ' ORDER BY at DESC LIMIT 200';
+  const rows = await d1All(db, sql, ...binds);
+  if (mark_read && rows.length) {
+    const ids = rows.map((r) => r.id);
+    // mark individually (D1 has no easy IN bind for dynamic)
+    for (const id of ids) {
+      await d1Run(db, 'UPDATE receipts SET read = 1 WHERE id = ?', id);
+    }
+  }
+  const unreadRows = await d1All(db, `SELECT id FROM receipts WHERE "to" = ? AND read = 0`, doorplate);
+  return {
+    doorplate,
+    company: company || null,
+    receipts: rows.map((r) => ({
+      schema: 'receipt/v1',
+      id: r.id,
+      type: r.type,
+      at: r.at,
+      company: r.company,
+      to: r.to,
+      from: r.from,
+      ref: (() => { try { return JSON.parse(r.ref || '{}'); } catch (_) { return {}; } })(),
+      body: (() => { try { return JSON.parse(r.body || '{}'); } catch (_) { return {}; } })(),
+      read: mark_read ? true : !!r.read,
+      label: r.label || RECEIPT_LABELS[r.type] || r.type,
+    })),
+    unread: unreadRows.length,
+  };
+}
+
+async function edgeCreateInvite(db, body, base) {
+  const company_code = String(body.company_code || '').trim().toUpperCase();
+  if (!company_code) throw new HttpError(400, 'company_code required');
+  const co = await d1First(db, 'SELECT code, name FROM companies WHERE code = ?', company_code);
+  const company_name = (co && co.name) || company_code;
+  const invite_id = 'INV-' + Date.now().toString(36).toUpperCase() + '-' + Array.from({ length: 4 }, () => COMPANY_ALPHABET[Math.floor(Math.random() * COMPANY_ALPHABET.length)]).join('');
+  const specs = normalizeCompanyTags(body.specialties != null ? body.specialties : body.tags);
+  const invite = {
+    invite_id,
+    company_code,
+    company_name,
+    role: body.role || null,
+    specialties: specs,
+    from: body.from || null,
+    target_hint: body.target_hint ? String(body.target_hint).slice(0, 120) : null,
+    note: body.note ? String(body.note).slice(0, 200) : null,
+    status: 'pending',
+    created_at: now(),
+    redeemed_at: null,
+    redeemed_by: null,
+    prompt: null,
+  };
+  invite.prompt = buildInviteRedeemPrompt(base || 'https://teams.vyibc.com', invite);
+  await d1Run(db,
+    `INSERT INTO invites (invite_id, company_code, company_name, role, specialties, from_doorplate, target_hint, note, status, prompt, created_at, redeemed_at, redeemed_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
+    invite.invite_id, invite.company_code, invite.company_name, invite.role,
+    JSON.stringify(specs), invite.from, invite.target_hint, invite.note, invite.status, invite.prompt, invite.created_at
+  );
+  if (invite.from) {
+    await edgePushReceipt(db, {
+      type: 'invite_sent',
+      company: company_code,
+      to: invite.from,
+      from: invite.from,
+      ref: { invite_id, company_code },
+      body: { role: invite.role, specialties: specs, target_hint: invite.target_hint },
+    });
+  }
+  return invite;
+}
+
+async function edgeGetInvite(db, invite_id) {
+  const row = await d1First(db, 'SELECT * FROM invites WHERE invite_id = ?', invite_id);
+  if (!row) throw new HttpError(404, `unknown invite: ${invite_id}`);
+  let specialties = [];
+  try { specialties = JSON.parse(row.specialties || '[]'); } catch (_) {}
+  return {
+    invite_id: row.invite_id,
+    company_code: row.company_code,
+    company_name: row.company_name,
+    role: row.role,
+    specialties,
+    from: row.from_doorplate,
+    target_hint: row.target_hint,
+    note: row.note,
+    status: row.status,
+    created_at: row.created_at,
+    redeemed_at: row.redeemed_at,
+    redeemed_by: row.redeemed_by,
+    prompt: row.prompt,
+  };
+}
+
+async function edgeRedeemInvite(db, stub, base, invite_id, agentFields) {
+  const inv = await edgeGetInvite(db, invite_id);
+  if (inv.status !== 'pending') throw new HttpError(409, `invite ${invite_id} already ${inv.status}`);
+  const tags = [...(inv.specialties || []), ...((agentFields && agentFields.tags) || [])];
+  const regBody = {
+    name: agentFields && agentFields.name,
+    avatar: agentFields && agentFields.avatar,
+    model: agentFields && agentFields.model,
+    role: (agentFields && agentFields.role) || inv.role || undefined,
+    tags,
+    company_code: inv.company_code,
+  };
+  const res = await stub.fetch(new Request(`${base}/api/agents/register`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(regBody),
+  }));
+  const agent = await res.json().catch(() => ({}));
+  if (!res.ok) throw new HttpError(res.status, (agent && agent.error) || 'register failed');
+  await d1Run(db,
+    'UPDATE invites SET status = ?, redeemed_at = ?, redeemed_by = ? WHERE invite_id = ?',
+    'redeemed', now(), agent.doorplate, invite_id
+  );
+  const ackBody = { invite_id, doorplate: agent.doorplate, name: agent.name, company_code: inv.company_code };
+  const to = inv.from || agent.doorplate;
+  await edgePushReceipt(db, {
+    type: 'invite_ack',
+    company: inv.company_code,
+    to,
+    from: agent.doorplate,
+    ref: { invite_id },
+    body: ackBody,
+  });
+  return { agent, invite: { ...inv, status: 'redeemed', redeemed_at: now(), redeemed_by: agent.doorplate } };
+}
+
+const EDGE_NEW_TOOLS = [
+  {
+    name: 'teams_list_companies',
+    description: 'List all companies with intro and specialty tags. 公司列表（简介+擅长）.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'teams_company_create',
+    description: '企业自助开公司（self-onboard）. Keywords: create company, 开公司, 企业自助入驻.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        intro: { type: 'string' },
+        tags: { type: 'array', items: { type: 'string' } },
+        specialties: { type: 'array', items: { type: 'string' } },
+      },
+    },
+  },
+  {
+    name: 'teams_update_company',
+    description: 'Update company intro and specialty tags. 更新简介/擅长.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        company_code: { type: 'string' },
+        intro: { type: 'string' },
+        tags: { type: 'array', items: { type: 'string' } },
+        specialties: { type: 'array', items: { type: 'string' } },
+        name: { type: 'string' },
+      },
+      required: ['company_code'],
+    },
+  },
+  {
+    name: 'teams_list_receipts',
+    description: 'List typed receipts（回执箱）. Types: invite_sent|invite_ack|claim_ok|submit_ok|review_pass|review_reject|broadcast|agent_offline|quota_warn.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        doorplate: { type: 'string' },
+        company_code: { type: 'string' },
+        type: { type: 'string' },
+        unread_only: { type: 'boolean' },
+        mark_read: { type: 'boolean' },
+      },
+      required: ['doorplate', 'company_code'],
+    },
+  },
+  {
+    name: 'teams_create_invite',
+    description: '代企业入驻：创建 invite + prompt。渠道投递用独立 invite-mcp.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        company_code: { type: 'string' },
+        from: { type: 'string' },
+        role: { type: 'string' },
+        specialties: { type: 'array', items: { type: 'string' } },
+        tags: { type: 'array', items: { type: 'string' } },
+        target_hint: { type: 'string' },
+        note: { type: 'string' },
+      },
+      required: ['company_code'],
+    },
+  },
+  {
+    name: 'teams_redeem_invite',
+    description: '兑付代企业入驻邀请，写入 invite_ack 回执.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        invite_id: { type: 'string' },
+        name: { type: 'string' },
+        avatar: { type: 'string' },
+        tags: { type: 'array', items: { type: 'string' } },
+        role: { type: 'string' },
+      },
+      required: ['invite_id', 'name'],
+    },
+  },
+];
 
 class HttpError extends Error {
 constructor(status, message, extra) {
@@ -444,6 +864,14 @@ cands.sort((x, y) => (x.created_at || 0) - (y.created_at || 0));
 cands.forEach((a, i) => { a.role = i === 0 ? "lead" : "member"; });
 }
 if (!s.feeds) s.feeds = {};
+if (!s.receipts) s.receipts = {}; // doorplate -> receipt[]
+if (!s.invites) s.invites = {}; // invite_id -> invite
+if (s.receiptSeq == null) s.receiptSeq = 0;
+if (s.inviteSeq == null) s.inviteSeq = 0;
+for (const c of Object.values(s.companies || {})) {
+  if (c.intro == null) c.intro = c.blurb || "";
+  if (!Array.isArray(c.tags)) c.tags = Array.isArray(c.specialties) ? c.specialties : [];
+}
 return s;
 }
 async _save(s) {
@@ -483,6 +911,7 @@ last_heartbeat: a.last_heartbeat || null,
 }
 
 _pubTask(t) {
+const result = t.result != null ? t.result : null;
 return {
 id: t.id,
 title: t.title,
@@ -496,7 +925,8 @@ company: t.company || null,
 claim_company: t.claim_company || null,
 task_type: t.task_type || "general",
 prompts: Array.isArray(t.prompts) ? t.prompts : [],
-result: t.result != null ? t.result : null,
+result,
+delivery: buildDeliveryEnvelope({ ...t, result }),
 artifacts: t.artifacts || [],
 created_at: t.created_at,
 claimed_at: t.claimed_at || null,
@@ -507,7 +937,16 @@ done_at: t.done_at || null,
 }
 
 _pubCompany(c) {
-return { code: c.code, name: c.name, created_at: c.created_at};
+const tags = Array.isArray(c.tags) ? c.tags : (Array.isArray(c.specialties) ? c.specialties : []);
+return {
+code: c.code,
+name: c.name,
+created_at: c.created_at,
+intro: c.intro || c.blurb || "",
+blurb: c.intro || c.blurb || "",
+tags,
+specialties: tags,
+};
 }
 
 _requireAgent(s, doorplate) {
@@ -598,15 +1037,107 @@ return `${NAME_ADJECTIVES[Math.floor(Math.random() * NAME_ADJECTIVES.length)]}${
 }
 
 // ---------- companies ----------
-_createCompany(s, name) {
+_createCompany(s, { name, intro, tags, specialties} = {}) {
 const code = this._genCompanyCode(s);
 const trimmed = name != null && String(name).trim() ? String(name).trim().slice(0, 30) : "";
 const autoName = trimmed || this._genCompanyName(s, code.slice(2));
-const c = { code, name: autoName, created_at: now()};
+const tagList = normalizeCompanyTags(tags != null ? tags : specialties);
+const c = {
+code,
+name: autoName,
+created_at: now(),
+intro: intro != null ? String(intro).slice(0, 280) : "",
+tags: tagList,
+};
 s.companies[code] = c;
 s.feeds[code] = [];
+this._feedPush(s, code, `🏢 公司成立：${c.name}（公司码 ${code}）· 企业自助入驻`);
 return this._pubCompany(c);
 }
+
+_updateCompany(s, company_code, patch, from) {
+const company = this._requireCompany(s, company_code);
+// lead optional: if from provided, must be lead; otherwise allow company-scoped update (UI)
+if (from) this._requireLead(s, from, company.code);
+if (patch && patch.name != null && String(patch.name).trim()) {
+company.name = String(patch.name).trim().slice(0, 30);
+}
+if (patch && (patch.intro != null || patch.blurb != null)) {
+company.intro = String(patch.intro != null ? patch.intro : patch.blurb).slice(0, 280);
+}
+if (patch && (patch.tags != null || patch.specialties != null)) {
+company.tags = normalizeCompanyTags(patch.tags != null ? patch.tags : patch.specialties);
+}
+this._feedPush(s, company.code, `公司资料已更新：${company.name}`);
+return this._pubCompany(company);
+}
+
+_listCompanies(s) {
+return Object.values(s.companies || {}).map((c) => {
+const member_count = Object.values(s.agents || {}).filter((a) => a.company === c.code).length;
+return { ...this._pubCompany(c), member_count };
+}).sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+}
+
+// ---------- receipts（回执箱）----------
+_pushReceipt(s, { type, company, to, from, ref, body}) {
+if (!RECEIPT_TYPES.includes(type)) throw new HttpError(400, `unknown receipt type: ${type}`);
+if (!to) throw new HttpError(400, "receipt.to required");
+s.receiptSeq = (s.receiptSeq || 0) + 1;
+const id = "R-" + s.receiptSeq;
+const rec = {
+schema: "receipt/v1",
+id,
+type,
+at: now(),
+company: company || null,
+to,
+from: from || null,
+ref: ref && typeof ref === "object" ? ref : {},
+body: body && typeof body === "object" ? body : {},
+read: false,
+label: RECEIPT_LABELS[type] || type,
+};
+if (!s.receipts[to]) s.receipts[to] = [];
+s.receipts[to].unshift(rec);
+if (s.receipts[to].length > 200) s.receipts[to].length = 200;
+return rec;
+}
+
+_listReceipts(s, { doorplate, company_code, type, unread_only, mark_read}) {
+const a = this._requireAgentInCompany(s, doorplate, company_code);
+let list = (s.receipts[doorplate] || []).map((r) => ({ ...r }));
+if (type && type !== "all") list = list.filter((r) => r.type === type);
+if (unread_only) list = list.filter((r) => !r.read);
+if (mark_read) {
+for (const r of (s.receipts[doorplate] || [])) {
+if (type && type !== "all" && r.type !== type) continue;
+r.read = true;
+}
+}
+return { doorplate, company: a.company, receipts: list, unread: (s.receipts[doorplate] || []).filter((r) => !r.read).length };
+}
+
+_markReceiptRead(s, receipt_id, doorplate, company_code) {
+this._requireAgentInCompany(s, doorplate, company_code);
+const list = s.receipts[doorplate] || [];
+const rec = list.find((r) => r.id === receipt_id);
+if (!rec) throw new HttpError(404, `unknown receipt: ${receipt_id}`);
+rec.read = true;
+return { ok: true, receipt: { ...rec } };
+}
+
+_notifyCompanyLeads(s, company_code, type, from, ref, body) {
+const members = Object.values(s.agents).filter((a) => a.company === company_code);
+const leads = members.filter((a) => a.role === "lead");
+const targets = leads.length ? leads : members.slice(0, 1);
+const out = [];
+for (const a of targets) {
+out.push(this._pushReceipt(s, { type, company: company_code, to: a.doorplate, from, ref, body }));
+}
+return out;
+}
+
 
 /** Company-level renew: scheduler passes the full doorplate list from workers-<code>.json */
 _companyRenew(s, company_code, doorplates, from) {
@@ -642,8 +1173,104 @@ _getCompany(s, code) {
 return this._pubCompany(this._requireCompany(s, code));
 }
 
+// ---------- invites（代企业入驻 token；渠道投递在独立 invite-mcp）----------
+_createInvite(s, { company_code, role, specialties, tags, from, target_hint, note}, base) {
+const company = this._requireCompany(s, company_code);
+if (from) this._requireAgentInCompany(s, from, company.code);
+s.inviteSeq = (s.inviteSeq || 0) + 1;
+const invite_id = "INV-" + s.inviteSeq + "-" + Array.from({ length: 4}, () => COMPANY_ALPHABET[Math.floor(Math.random() * COMPANY_ALPHABET.length)]).join("");
+const specs = normalizeCompanyTags(specialties != null ? specialties : tags);
+const invite = {
+  invite_id,
+  company_code: company.code,
+  company_name: company.name,
+  role: role || null,
+  specialties: specs,
+  from: from || null,
+  target_hint: target_hint ? String(target_hint).slice(0, 120) : null,
+  note: note ? String(note).slice(0, 200) : null,
+  status: "pending",
+  created_at: now(),
+  redeemed_at: null,
+  redeemed_by: null,
+  prompt: null,
+};
+invite.prompt = buildInviteRedeemPrompt(base || "https://teams.vyibc.com", invite);
+s.invites[invite_id] = invite;
+if (from) {
+  this._pushReceipt(s, {
+    type: "invite_sent",
+    company: company.code,
+    to: from,
+    from,
+    ref: { invite_id, company_code: company.code },
+    body: { role: invite.role, specialties: specs, target_hint: invite.target_hint },
+  });
+}
+this._feedPush(s, company.code, `📨 代企业入驻邀请已创建 ${invite_id}`);
+return { ...invite };
+}
+
+_getInvite(s, invite_id) {
+const inv = s.invites && s.invites[invite_id];
+if (!inv) throw new HttpError(404, `unknown invite: ${invite_id}`);
+return { ...inv };
+}
+
+_redeemInvite(s, invite_id, agentFields) {
+const inv = s.invites && s.invites[invite_id];
+if (!inv) throw new HttpError(404, `unknown invite: ${invite_id}`);
+if (inv.status !== "pending") throw new HttpError(409, `invite ${invite_id} already ${inv.status}`);
+const tags = [
+  ...(Array.isArray(inv.specialties) ? inv.specialties : []),
+  ...(Array.isArray(agentFields && agentFields.tags) ? agentFields.tags : []),
+];
+const af = agentFields || {};
+const registered = this._register(s, {
+  name: af.name,
+  tags,
+  model: af.model,
+  avatar: af.avatar,
+  role: af.role || inv.role || undefined,
+  company_code: inv.company_code,
+  // deliberately omit invite_id to avoid re-entrancy with _register invite branch
+});
+inv.status = "redeemed";
+inv.redeemed_at = now();
+inv.redeemed_by = registered.doorplate;
+const ackBody = {
+  invite_id,
+  doorplate: registered.doorplate,
+  name: registered.name,
+  company_code: inv.company_code,
+};
+if (inv.from) {
+  this._pushReceipt(s, {
+    type: "invite_ack",
+    company: inv.company_code,
+    to: inv.from,
+    from: registered.doorplate,
+    ref: { invite_id, task_id: null },
+    body: ackBody,
+  });
+} else {
+  this._notifyCompanyLeads(s, inv.company_code, "invite_ack", registered.doorplate, { invite_id }, ackBody);
+}
+this._feedPush(s, inv.company_code, `✅ 邀请 ${invite_id} 已兑付：${registered.doorplate} 入职`);
+return { agent: registered, invite: { ...inv } };
+}
+
 // ---------- agents ----------
-_register(s, { name, tags, model, avatar, role, company_code, company_name}) {
+_register(s, { name, tags, model, avatar, role, company_code, company_name, invite_id}) {
+// 代企业入驻：带 invite_id 时走兑付（企业感知入职）
+if (invite_id) {
+  const inv = s.invites && s.invites[invite_id];
+  if (!inv) throw new HttpError(404, `unknown invite: ${invite_id}`);
+  if (inv.status !== "pending") throw new HttpError(409, `invite ${invite_id} already ${inv.status}`);
+  // Prevent re-entrancy: redeem calls _register without invite_id
+  const fields = { name, tags, model, avatar, role, company_code };
+  return this._redeemInvite(s, invite_id, fields).agent;
+}
 const preset = role && ROLE_PRESETS[role]? ROLE_PRESETS[role]: null;
 let company;
 if (company_code && String(company_code).trim()) {
@@ -657,6 +1284,8 @@ company = {
 code,
 name: foundedName,
 created_at: now(),
+intro: "",
+tags: [],
 };
 s.companies[code] = company;
 s.feeds[code] = [];
@@ -935,6 +1564,14 @@ const note = cross
   : `${doorplate} 认领了 ${id}（${t.title}）`;
 this._feedPush(s, a.company, note);
 if (cross) this._feedPush(s, t.company, note);
+// 回执：通知发单方 lead 有人抢单
+this._notifyCompanyLeads(s, t.company, "claim_ok", doorplate, { task_id: id }, {
+  task_id: id,
+  title: t.title,
+  claimer: doorplate,
+  claim_company: a.company,
+  cross_company: !!cross,
+});
 return this._enrichTask(s, t);
 }
 
@@ -975,6 +1612,23 @@ t.status = "review";
 const note = `${doorplate}（${a.company}）提交了 ${id} 的产物，待验收`;
 this._feedPush(s, a.company, note);
 if (t.company && t.company !== a.company) this._feedPush(s, t.company, note);
+// 回执：submit_ok → 发单方 + 提交人（交付包挂任务 result，回执只通知）
+const submitBody = {
+  task_id: id,
+  title: t.title,
+  task_type: t.task_type || "general",
+  has_delivery: t.result != null,
+  artifact_count: Array.isArray(t.artifacts) ? t.artifacts.length : 0,
+};
+this._notifyCompanyLeads(s, t.company, "submit_ok", doorplate, { task_id: id }, submitBody);
+this._pushReceipt(s, {
+  type: "submit_ok",
+  company: a.company,
+  to: doorplate,
+  from: doorplate,
+  ref: { task_id: id },
+  body: submitBody,
+});
 return this._enrichTask(s, t);
 }
 
@@ -994,6 +1648,19 @@ this._feedPush(s, caller, `${id} 验收通过 ✅${note? "（" + note + "）": "
 if (t.claim_company && t.claim_company !== caller) {
 this._feedPush(s, t.claim_company, `${id} 验收通过 ✅${note? "（" + note + "）": ""}`);
 }
+if (t.owner) {
+  this._pushReceipt(s, {
+    type: "review_pass",
+    company: caller,
+    to: t.owner,
+    from: null,
+    ref: { task_id: id },
+    body: { task_id: id, title: t.title, note: note || null },
+  });
+}
+this._notifyCompanyLeads(s, caller, "review_pass", t.owner, { task_id: id }, {
+  task_id: id, title: t.title, note: note || null, owner: t.owner,
+});
 } else {
 const prev = t.owner;
 const prevCo = t.claim_company;
@@ -1007,6 +1674,19 @@ const a = s.agents[prev];
 if (a && a.current_task === id) a.current_task = null;
 this._feedPush(s, caller, `${id} 被打回，已退回待认领${note? "（" + note + "）": ""}`);
 if (prevCo && prevCo !== caller) this._feedPush(s, prevCo, `${id} 被打回，已退回待认领${note? "（" + note + "）": ""}`);
+if (prev) {
+  this._pushReceipt(s, {
+    type: "review_reject",
+    company: caller,
+    to: prev,
+    from: null,
+    ref: { task_id: id },
+    body: { task_id: id, title: t.title, note: note || null },
+  });
+}
+this._notifyCompanyLeads(s, caller, "review_reject", prev, { task_id: id }, {
+  task_id: id, title: t.title, note: note || null, previous_owner: prev,
+});
 }
 return this._enrichTask(s, t);
 }
@@ -1040,6 +1720,18 @@ for (const dp of Object.keys(s.agents)) {
 if (s.agents[dp].company === company) { s.mailbox[dp].push({...m}); n++;}
 }
 this._feedPush(s, company, `📢 广播：${String(text).slice(0, 60)}`);
+for (const dp of Object.keys(s.agents)) {
+  if (s.agents[dp].company === company) {
+    this._pushReceipt(s, {
+      type: "broadcast",
+      company,
+      to: dp,
+      from: sender,
+      ref: {},
+      body: { text: String(text).slice(0, 500) },
+    });
+  }
+}
 return { ok: true, recipients: n};
 }
 
@@ -1072,7 +1764,8 @@ name: { type: "string", description: "Display name for this agent, e.g. 'Coder-1
 tags: { type: "array", items: { type: "string"}, description: "Skill tags, e.g. [\"coder\",\"reviewer\"]. Tasks are matched by tags."},
 avatar: { type: "string", description: "Optional emoji avatar, e.g. '🦊'. Auto-assigned if omitted."},
 company_code: { type: "string", description: "Company code to join, e.g. 'C-7K2Q'. Omit to found a new company."},
-company_name: { type: "string", description: "Company name, used when founding a new company."}
+company_name: { type: "string", description: "Company name, used when founding a new company (企业自己入驻/开公司)."},
+invite_id: { type: "string", description: "代企业入驻 invite id from teams_create_invite. When set, joins that company and emits invite_ack (prefer teams_redeem_invite)."}
 },
 required: ["name"]
 }
@@ -1130,14 +1823,15 @@ required: ["task_id", "doorplate", "company_code"]
 },
 {
 name: "teams_submit",
-description: "Submit your finished work for a claimed task; it goes to 'review' for the lead to accept. 提交产物。Only the task owner can submit. Keywords: submit, deliver, done, 提交, 交付.",
+description: "Submit delivery package（交付包）for a claimed task; goes to review. For video_gen pass result:[{prompt,video_url|asset_id,meta?}]. Field name is result; product name is 交付包. Also writes submit_ok receipt. Keywords: submit, deliver, delivery package, 提交, 交付包.",
 inputSchema: {
 type: "object",
 properties: {
 task_id: { type: "string", description: "Task id"},
 doorplate: { type: "string", description: "Your doorplate (must be the task owner)"},
 company_code: { type: "string", description: "Your company code. Required."},
-artifacts: { type: "array", description: "Deliverables", items: { type: "object", properties: { type: { type: "string", description: "e.g. 'text', 'url', 'file'"}, content: { type: "string", description: "The deliverable content or URL"}}, required: ["type", "content"]}}
+artifacts: { type: "array", description: "Deliverables", items: { type: "object", properties: { type: { type: "string", description: "e.g. 'text', 'url', 'file'"}, content: { type: "string", description: "The deliverable content or URL"}}, required: ["type", "content"]}},
+result: { type: "array", description: "video_gen 交付包 payload: [{prompt, video_url?, asset_id?, meta?}]", items: { type: "object"}}
 },
 required: ["task_id", "doorplate", "company_code"]
 }
@@ -1202,7 +1896,7 @@ required: ["from", "text", "company_code"]
 },
 {
 name: "teams_read_inbox",
-description: "Read your inbox messages (marks them read). 查收邮箱。Poll regularly along with tasks. company_code is required. Keywords: inbox, mail, messages, 收件箱, 查邮件.",
+description: "Read p2p/broadcast mailbox (marks them read). For typed 回执箱 use teams_list_receipts. Keywords: inbox, mail, messages, 收件箱, 查邮件.",
 inputSchema: {
 type: "object",
 properties: {
@@ -1250,8 +1944,90 @@ company_code: { type: "string", description: "Company code (alternative to doorp
 }
 },
 {
+name: "teams_list_companies",
+description: "List all companies with intro（简介）and specialty tags（擅长标签）. 公司列表。Keywords: companies, list, intro, tags, 公司, 简介, 擅长.",
+inputSchema: { type: "object", properties: {} }
+},
+{
+name: "teams_company_create",
+description: "企业自助开公司（self-onboard）：创建空公司壳，返回公司码。不等于代企业入驻。Create a company without registering an agent. Keywords: create company, self-onboard, 开公司, 企业自助入驻.",
+inputSchema: {
+type: "object",
+properties: {
+name: { type: "string", description: "Company name (optional, auto-generated if omitted)"},
+intro: { type: "string", description: "Company intro / blurb 简介"},
+tags: { type: "array", items: { type: "string"}, description: "Specialty tags e.g. [\"video_gen\",\"edit\"]"},
+specialties: { type: "array", items: { type: "string"}, description: "Alias of tags"}
+}
+}
+},
+{
+name: "teams_update_company",
+description: "Update company intro and specialty tags. 更新公司简介与擅长标签。Keywords: update company, intro, tags, 简介, 擅长.",
+inputSchema: {
+type: "object",
+properties: {
+company_code: { type: "string", description: "Company code"},
+intro: { type: "string", description: "简介"},
+blurb: { type: "string", description: "Alias of intro"},
+tags: { type: "array", items: { type: "string"}},
+specialties: { type: "array", items: { type: "string"}},
+name: { type: "string"},
+from: { type: "string", description: "Optional lead doorplate for authorization"}
+},
+required: ["company_code"]
+}
+},
+{
+name: "teams_list_receipts",
+description: "List typed receipts（回执箱 fixed enum）. Separate from task delivery package. Filter by type: invite_sent|invite_ack|claim_ok|submit_ok|review_pass|review_reject|broadcast|agent_offline|quota_warn. Keywords: receipts, 回执箱, ack.",
+inputSchema: {
+type: "object",
+properties: {
+doorplate: { type: "string"},
+company_code: { type: "string"},
+type: { type: "string", description: "Receipt type or 'all'"},
+unread_only: { type: "boolean"},
+mark_read: { type: "boolean", description: "Mark returned receipts as read"}
+},
+required: ["doorplate", "company_code"]
+}
+},
+{
+name: "teams_create_invite",
+description: "代企业入驻：创建 pending invite + 入驻提示词。Does NOT deliver to Muse Linux (use channel invite-mcp for deliver). On redeem, Teams emits invite_ack receipt. Keywords: invite, proxy-onboard, 代企业入驻, 邀请.",
+inputSchema: {
+type: "object",
+properties: {
+company_code: { type: "string"},
+from: { type: "string", description: "Inviter doorplate (receives invite_sent / invite_ack)"},
+role: { type: "string"},
+specialties: { type: "array", items: { type: "string"}, description: "e.g. [\"video_gen\",\"edit\"]"},
+tags: { type: "array", items: { type: "string"}},
+target_hint: { type: "string", description: "Optional channel target hint"},
+note: { type: "string"}
+},
+required: ["company_code"]
+}
+},
+{
+name: "teams_redeem_invite",
+description: "Redeem a proxy-onboard invite_id: register into the invited company and emit invite_ack. 兑付代企业入驻邀请. Keywords: redeem, join via invite, 兑付, 入职.",
+inputSchema: {
+type: "object",
+properties: {
+invite_id: { type: "string"},
+name: { type: "string"},
+avatar: { type: "string"},
+tags: { type: "array", items: { type: "string"}},
+role: { type: "string"}
+},
+required: ["invite_id", "name"]
+}
+},
+{
 name: "teams_task_trace",
-description: "One-order lifecycle chain: created → plaza → claimed → submitted → reviewed. 一单链路追溯。Returns stages with timestamps/actors and durations_ms. Keywords: trace, timeline, chain, lifecycle, 链路, 追溯, 时间线.",
+description: "One-order lifecycle chain: created → plaza → claimed → submitted → reviewed. 一单链路追溯。Returns stages with timestamps/actors and durations_ms. Also includes delivery（交付包）envelope when result present. Keywords: trace, timeline, chain, lifecycle, 链路, 追溯, 时间线.",
 inputSchema: {
 type: "object",
 properties: {
@@ -1282,6 +2058,12 @@ case "teams_list_agents": return { agents: this._listAgents(s, this._resolveComp
 case "teams_update_profile": return this._updateProfile(s, a.doorplate, a, a.company_code);
 case "teams_feed": return { feed: this._feedOf(s, this._resolveCompany(s, a))};
 case "teams_task_trace": return this._taskTrace(s, a.task_id);
+case "teams_list_companies": return { companies: this._listCompanies(s) };
+case "teams_company_create": return this._createCompany(s, a);
+case "teams_update_company": return this._updateCompany(s, a.company_code, a, a.from);
+case "teams_list_receipts": return this._listReceipts(s, a);
+case "teams_create_invite": return this._createInvite(s, a, "https://teams.vyibc.com");
+case "teams_redeem_invite": return this._redeemInvite(s, a.invite_id, a);
 default: throw new HttpError(404, `unknown tool: ${name}`);
 }
 }
@@ -1360,7 +2142,7 @@ const companyOf = (b) => (b && b.company_code) || query.get("company");
 
 // GET /api/health
 if (method === "GET" && r.length === 1 && r[0] === "health")
-return json({ ok: true, do_version: "2026-10-15-trace-v1", has_task_trace: typeof this._taskTrace === "function"});
+return json({ ok: true, do_version: "2026-10-15-delivery-receipt-invite-v1", has_task_trace: typeof this._taskTrace === "function", has_receipts: true, has_invites: true});
 
 // GET /api/invite?role=&company=
 if (method === "GET" && r.length === 1 && r[0] === "invite") {
@@ -1394,11 +2176,15 @@ tasks: Object.keys(s.tasks || {}).length,
 
 // POST /api/companies — 创建新公司
 if (method === "POST" && r.length === 1 && r[0] === "companies")
-return json(this._createCompany(s, body && body.name));
+return json(this._createCompany(s, body || {}));
 
 // GET /api/companies/:code — 查询公司（入驻校验用）
 if (method === "GET" && r.length === 2 && r[0] === "companies")
 return json(this._getCompany(s, r[1]));
+
+// PATCH /api/companies/:code — 更新简介/擅长标签
+if (method === "PATCH" && r.length === 2 && r[0] === "companies")
+return json(this._updateCompany(s, r[1], body || {}, body && body.from));
 
 // POST /api/companies/:code/renew — 公司级续约（名单内员工全部刷新心跳）
 if (method === "POST" && r.length === 3 && r[0] === "companies" && r[2] === "renew")
@@ -1485,6 +2271,34 @@ return json(this._review(s, r[1], body.approved, body.note, body.company_code));
 if (method === "DELETE" && r.length === 2 && r[0] === "tasks")
 return json(this._deleteTask(s, r[1], companyOf(body) || query.get("company"), (body && body.from) || query.get("from")));
 
+// GET /api/receipts?doorplate=&company=&type=&unread_only=&mark_read=
+if (method === "GET" && r.length === 1 && r[0] === "receipts")
+return json(this._listReceipts(s, {
+  doorplate: query.get("doorplate"),
+  company_code: query.get("company") || query.get("company_code"),
+  type: query.get("type") || "all",
+  unread_only: query.get("unread_only") === "1" || query.get("unread_only") === "true",
+  mark_read: query.get("mark_read") === "1" || query.get("mark_read") === "true",
+}));
+
+// POST /api/receipts/:id/read
+if (method === "POST" && r.length === 3 && r[0] === "receipts" && r[2] === "read")
+return json(this._markReceiptRead(s, r[1], body.doorplate, body.company_code));
+
+// POST /api/invites — 代企业入驻：创建邀请（不投递渠道）
+if (method === "POST" && r.length === 1 && r[0] === "invites") {
+  const base = `${url.protocol}//${url.host}`;
+  return json(this._createInvite(s, body || {}, base));
+}
+
+// GET /api/invites/:id
+if (method === "GET" && r.length === 2 && r[0] === "invites")
+return json(this._getInvite(s, r[1]));
+
+// POST /api/invites/:id/redeem
+if (method === "POST" && r.length === 3 && r[0] === "invites" && r[2] === "redeem")
+return json(this._redeemInvite(s, r[1], body || {}));
+
 // POST /api/mail/send
 if (method === "POST" && r.length === 2 && r[0] === "mail" && r[1] === "send")
 return json(this._sendMail(s, body.from, body.to, body.text, body.task_id, body.company_code));
@@ -1509,7 +2323,7 @@ return new Response(null, { status: 204, headers: {...CORS_HEADERS}});
 const url = new URL(request.url);
 // 边缘探针：不进 DO，确认 Worker 新版本已生效
 if (url.pathname === "/api/version-probe")
-return json({ edge_version: "2026-10-15-trace-v2", ok: true, feature: "task_trace_edge" });
+return json({ edge_version: "2026-10-15-delivery-receipt-invite-v1", ok: true, feature: "delivery_receipt_invite" });
 const id = env.TASK_QUEUE.idFromName("main");
 const stub = env.TASK_QUEUE.get(id);
 const base = `${url.protocol}//${url.host}`;
@@ -1554,12 +2368,35 @@ companyName = cdata && cdata.name;
 return json(buildInvitePrompt(base, role, company, companyName));
 }
 
-// POST /api/companies — create in DO, then merge invite_prompt at edge
+// POST /api/companies — create in DO, then merge invite_prompt + intro/tags at edge (D1)
 if (url.pathname === "/api/companies" && request.method.toUpperCase() === "POST") {
-const res = await stub.fetch(request);
+let createBody = null;
+try { createBody = await request.json(); } catch (_) { createBody = {}; }
+const res = await stub.fetch(new Request(request.url, {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify(createBody || {}),
+}));
 let data = null;
 try { data = await res.json();} catch (_) { /* ignore */}
 if (!res.ok) return json(data || { ok: false, error: "create failed"}, res.status);
+// Ensure D1 row exists then apply intro/tags (DO may be sticky on old code)
+try {
+  await ensureD1Schema(env.DB);
+  const existing = await d1First(env.DB, "SELECT code FROM companies WHERE code = ?", data.code);
+  if (!existing) {
+    await d1Run(env.DB,
+      "INSERT INTO companies (code, name, created_at, intro, tags) VALUES (?, ?, ?, ?, ?)",
+      data.code, data.name || data.code, data.created_at || now(), "", "[]"
+    );
+  }
+  const profile = await edgeUpdateCompanyProfile(env.DB, data.code, {
+    intro: createBody && (createBody.intro != null ? createBody.intro : createBody.blurb),
+    tags: createBody && (createBody.tags != null ? createBody.tags : createBody.specialties),
+    name: createBody && createBody.name,
+  });
+  if (profile) data = { ...data, ...profile };
+} catch (e) { console.error("edge company profile", e && e.message); }
 const invite = buildInvitePrompt(base, null, data.code, data.name);
 return json({...data, invite_prompt: invite.prompt});
 }
@@ -1599,6 +2436,9 @@ const tools = (data && data.result && data.result.tools) || [];
 if (!tools.some((t) => t && t.name === "teams_task_trace")) {
 tools.push(TASK_TRACE_TOOL);
 }
+for (const t of EDGE_NEW_TOOLS) {
+  if (!tools.some((x) => x && x.name === t.name)) tools.push(t);
+}
 if (data && data.result) data.result.tools = tools;
 return json(data);
 }
@@ -1621,12 +2461,312 @@ id: rpcId,
 result: { content: [{ type: "text", text: JSON.stringify(trace) }] },
 });
 }
+// Edge MCP handlers for sticky-DO new tools
+if (body && body.method === "tools/call" && body.params && EDGE_NEW_TOOLS.some((t) => t.name === body.params.name)) {
+  const rpcId = body.id !== undefined ? body.id : null;
+  const name = body.params.name;
+  const args = body.params.arguments || {};
+  try {
+    let out;
+    if (name === "teams_list_companies") {
+      out = { companies: await listCompaniesFromD1(env.DB) };
+    } else if (name === "teams_company_create") {
+      const cres = await stub.fetch(new Request(`${base}/api/companies`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(args),
+      }));
+      out = await cres.json();
+      if (!cres.ok) throw new HttpError(cres.status, (out && out.error) || "create failed");
+      try {
+        await ensureD1Schema(env.DB);
+        const existing = await d1First(env.DB, "SELECT code FROM companies WHERE code = ?", out.code);
+        if (!existing) {
+          await d1Run(env.DB,
+            "INSERT INTO companies (code, name, created_at, intro, tags) VALUES (?, ?, ?, ?, ?)",
+            out.code, out.name || out.code, out.created_at || now(), "", "[]");
+        }
+        const profile = await edgeUpdateCompanyProfile(env.DB, out.code, args);
+        if (profile) out = { ...out, ...profile };
+        out.invite_prompt = buildInvitePrompt(base, null, out.code, out.name).prompt;
+      } catch (pe) { console.error("mcp create profile", pe && pe.message); }
+    } else if (name === "teams_update_company") {
+      const code = args.company_code;
+      const ures = await stub.fetch(new Request(`${base}/api/companies/${encodeURIComponent(code)}`, {
+        method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(args),
+      }));
+      // edge PATCH handler above runs when going through worker URL; call helper directly
+      out = await edgeUpdateCompanyProfile(env.DB, code, args) || await ures.json();
+    } else if (name === "teams_list_receipts") {
+      out = await edgeListReceipts(env.DB, {
+        doorplate: args.doorplate,
+        company: args.company_code,
+        type: args.type || "all",
+        unread_only: !!args.unread_only,
+        mark_read: !!args.mark_read,
+      });
+    } else if (name === "teams_create_invite") {
+      out = await edgeCreateInvite(env.DB, args, base);
+    } else if (name === "teams_redeem_invite") {
+      out = await edgeRedeemInvite(env.DB, stub, base, args.invite_id, args);
+    } else {
+      throw new HttpError(404, `unknown tool: ${name}`);
+    }
+    return json({ jsonrpc: "2.0", id: rpcId, result: { content: [{ type: "text", text: JSON.stringify(out) }] } });
+  } catch (e) {
+    const msg = e && e.message ? e.message : String(e);
+    return json({ jsonrpc: "2.0", id: rpcId, error: { code: -32602, message: msg } });
+  }
+}
+
 // Other MCP methods: rebuild request with already-read body
 return stub.fetch(new Request(request.url, {
 method: "POST",
 headers: { "content-type": "application/json" },
 body: JSON.stringify(body),
 }));
+}
+
+// ---- Edge routes for sticky-DO resilience (回执箱 / 代企业入驻 / 公司简介) ----
+try {
+  // PATCH /api/companies/:code
+  {
+    const m = url.pathname.match(/^\/api\/companies\/([^/]+)$/);
+    if (method === "PATCH" && m) {
+      let body = null;
+      try { body = await request.json(); } catch (_) { body = {}; }
+      const code = decodeURIComponent(m[1]).toUpperCase();
+      // best-effort DO update (sticky DO may hang/404 — never block edge)
+      try { await withTimeout(stub.fetch(new Request(request.url, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}) })), 2000); } catch (_) {}
+      const profile = await edgeUpdateCompanyProfile(env.DB, code, body || {});
+      if (!profile) {
+        // ensure row from DO get
+        const cres = await stub.fetch(new Request(`${base}/api/companies/${encodeURIComponent(code)}`, { method: "GET" }));
+        const cdata = await cres.json().catch(() => null);
+        if (!cres.ok) return json(cdata || { ok: false, error: "not found" }, cres.status);
+        await ensureD1Schema(env.DB);
+        await d1Run(env.DB,
+          "INSERT OR IGNORE INTO companies (code, name, created_at, intro, tags) VALUES (?, ?, ?, ?, ?)",
+          cdata.code, cdata.name || cdata.code, cdata.created_at || now(), "", "[]"
+        );
+        const again = await edgeUpdateCompanyProfile(env.DB, code, body || {});
+        return json(again || { ...cdata, ...(body || {}) });
+      }
+      return json(profile);
+    }
+  }
+
+  // Invites
+  if (url.pathname === "/api/invites" && method === "POST") {
+    let body = null;
+    try { body = await request.json(); } catch (_) { body = {}; }
+    try {
+      const invite = await edgeCreateInvite(env.DB, body || {}, base);
+      return json(invite);
+    } catch (e) {
+      if (e instanceof HttpError) return json({ ok: false, error: e.message }, e.status);
+      throw e;
+    }
+  }
+  {
+    const m = url.pathname.match(/^\/api\/invites\/([^/]+)$/);
+    if (method === "GET" && m) {
+      try {
+        return json(await edgeGetInvite(env.DB, decodeURIComponent(m[1])));
+      } catch (e) {
+        if (e instanceof HttpError) return json({ ok: false, error: e.message }, e.status);
+        throw e;
+      }
+    }
+  }
+  {
+    const m = url.pathname.match(/^\/api\/invites\/([^/]+)\/redeem$/);
+    if (method === "POST" && m) {
+      let body = null;
+      try { body = await request.json(); } catch (_) { body = {}; }
+      try {
+        return json(await edgeRedeemInvite(env.DB, stub, base, decodeURIComponent(m[1]), body || {}));
+      } catch (e) {
+        if (e instanceof HttpError) return json({ ok: false, error: e.message }, e.status);
+        throw e;
+      }
+    }
+  }
+
+  // Receipts
+  if (url.pathname === "/api/receipts" && method === "GET") {
+    try {
+      return json(await edgeListReceipts(env.DB, {
+        doorplate: url.searchParams.get("doorplate"),
+        company: url.searchParams.get("company") || url.searchParams.get("company_code"),
+        type: url.searchParams.get("type") || "all",
+        unread_only: url.searchParams.get("unread_only") === "1" || url.searchParams.get("unread_only") === "true",
+        mark_read: url.searchParams.get("mark_read") === "1" || url.searchParams.get("mark_read") === "true",
+      }));
+    } catch (e) {
+      if (e instanceof HttpError) return json({ ok: false, error: e.message }, e.status);
+      throw e;
+    }
+  }
+  {
+    const m = url.pathname.match(/^\/api\/receipts\/([^/]+)\/read$/);
+    if (method === "POST" && m) {
+      let body = null;
+      try { body = await request.json(); } catch (_) { body = {}; }
+      await d1Run(env.DB, 'UPDATE receipts SET read = 1 WHERE id = ? AND "to" = ?', decodeURIComponent(m[1]), body.doorplate);
+      return json({ ok: true, id: decodeURIComponent(m[1]) });
+    }
+  }
+
+  // Wrap claim/submit/review/broadcast to emit edge receipts
+  {
+    const m = url.pathname.match(/^\/api\/tasks\/([^/]+)\/(claim|submit|review)$/);
+    if (method === "POST" && m) {
+      const taskId = decodeURIComponent(m[1]);
+      const action = m[2];
+      let body = null;
+      try { body = await request.json(); } catch (_) { body = {}; }
+      const res = await stub.fetch(new Request(request.url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body || {}),
+      }));
+      let data = null;
+      try { data = await res.json(); } catch (_) {}
+      if (res.ok && env.DB) {
+        try {
+          if (action === "claim") {
+            const claimBody = { task_id: taskId, title: data.title, claimer: body.doorplate, claim_company: data.claim_company };
+            await edgePushReceipt(env.DB, {
+              type: "claim_ok",
+              company: data.company,
+              to: body.doorplate,
+              from: body.doorplate,
+              ref: { task_id: taskId },
+              body: claimBody,
+            });
+            try {
+              const agentsRes = await stub.fetch(new Request(`${base}/api/agents?company=${encodeURIComponent(data.company)}`, { method: "GET" }));
+              const agentsData = await agentsRes.json().catch(() => ({ agents: [] }));
+              const leads = (agentsData.agents || []).filter((a) => a.role === "lead");
+              for (const lead of (leads.length ? leads : (agentsData.agents || []).slice(0, 1))) {
+                if (lead.doorplate === body.doorplate) continue;
+                await edgePushReceipt(env.DB, {
+                  type: "claim_ok",
+                  company: data.company,
+                  to: lead.doorplate,
+                  from: body.doorplate,
+                  ref: { task_id: taskId },
+                  body: claimBody,
+                });
+              }
+            } catch (_) {}
+          } else if (action === "submit") {
+            // attach delivery envelope if missing
+            if (data && data.result != null && !data.delivery) {
+              data.delivery = buildDeliveryEnvelope(data);
+            }
+            const submitBody = {
+              task_id: taskId,
+              title: data.title,
+              task_type: data.task_type || "general",
+              has_delivery: data.result != null,
+            };
+            await edgePushReceipt(env.DB, {
+              type: "submit_ok",
+              company: data.claim_company || body.company_code,
+              to: body.doorplate,
+              from: body.doorplate,
+              ref: { task_id: taskId },
+              body: submitBody,
+            });
+            try {
+              const agentsRes = await stub.fetch(new Request(`${base}/api/agents?company=${encodeURIComponent(data.company)}`, { method: "GET" }));
+              const agentsData = await agentsRes.json().catch(() => ({ agents: [] }));
+              const leads = (agentsData.agents || []).filter((a) => a.role === "lead");
+              for (const lead of (leads.length ? leads : (agentsData.agents || []).slice(0, 1))) {
+                await edgePushReceipt(env.DB, {
+                  type: "submit_ok",
+                  company: data.company,
+                  to: lead.doorplate,
+                  from: body.doorplate,
+                  ref: { task_id: taskId },
+                  body: submitBody,
+                });
+              }
+            } catch (_) {}
+          } else if (action === "review") {
+            const typ = body.approved ? "review_pass" : "review_reject";
+            let owner = data.owner;
+            if (!owner) {
+              try {
+                const before = await stub.fetch(new Request(`${base}/api/tasks/${encodeURIComponent(taskId)}`, { method: "GET" }));
+                // too late — already reviewed. Prefer owner from submit_ok receipts skip.
+              } catch (_) {}
+            }
+            // On approve, owner remains; on reject DO clears owner — also notify claimant company via claim_company if present
+            const targets = new Set();
+            if (data.owner) targets.add(data.owner);
+            // Heuristic: if approved, owner is present; if rejected, try body.doorplate unused
+            if (!targets.size && body && body.notify_doorplate) targets.add(body.notify_doorplate);
+            for (const to of targets) {
+              await edgePushReceipt(env.DB, {
+                type: typ,
+                company: data.company,
+                to,
+                from: null,
+                ref: { task_id: taskId },
+                body: { task_id: taskId, title: data.title, note: body.note || null, approved: !!body.approved },
+              });
+            }
+          }
+        } catch (re) { console.error("edge receipt wrap", re && re.message); }
+      }
+      return json(data, res.status);
+    }
+  }
+  if (url.pathname === "/api/mail/broadcast" && method === "POST") {
+    let body = null;
+    try { body = await request.json(); } catch (_) { body = {}; }
+    const res = await stub.fetch(new Request(request.url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body || {}),
+    }));
+    let data = null;
+    try { data = await res.json(); } catch (_) {}
+    if (res.ok && env.DB && body.company_code) {
+      try {
+        const agentsRes = await stub.fetch(new Request(`${base}/api/agents?company=${encodeURIComponent(body.company_code)}`, { method: "GET" }));
+        const agentsData = await agentsRes.json().catch(() => ({ agents: [] }));
+        for (const a of agentsData.agents || []) {
+          await edgePushReceipt(env.DB, {
+            type: "broadcast",
+            company: body.company_code,
+            to: a.doorplate,
+            from: body.from,
+            ref: {},
+            body: { text: String(body.text || "").slice(0, 500) },
+          });
+        }
+      } catch (be) { console.error("edge broadcast receipt", be && be.message); }
+    }
+    return json(data, res.status);
+  }
+
+  // Enrich single task GET with delivery envelope
+  {
+    const m = url.pathname.match(/^\/api\/tasks\/([^/]+)$/);
+    if (method === "GET" && m) {
+      const res = await stub.fetch(request);
+      let data = null;
+      try { data = await res.json(); } catch (_) {}
+      if (res.ok && data && data.result != null && !data.delivery) {
+        data.delivery = buildDeliveryEnvelope(data);
+      }
+      return json(data, res.status);
+    }
+  }
+} catch (edgeErr) {
+  console.error("edge route error", edgeErr && edgeErr.message);
 }
 
 return stub.fetch(request);

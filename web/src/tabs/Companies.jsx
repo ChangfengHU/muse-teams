@@ -4,6 +4,19 @@ import {
   api, getCompany, setCompany,
   listSavedCompanies, saveCompanyLocal, updateSavedCompany,
 } from '../api.js';
+
+const SPEC_LABELS = {
+  video_gen: '🎬 视频生成',
+  edit: '✂️ 剪辑',
+  general: '🧩 通用',
+  coder: '💻 码农',
+  reviewer: '🔍 验收',
+  research: '🔬 研究',
+  qa: '🧪 测试',
+  'zh-writing': '✍️ 写作',
+  devops: '🛠 运维',
+};
+
 import MonsterAvatar from '../components/MonsterAvatar.jsx';
 
 const PAGE_SIZE = 8;
@@ -12,6 +25,8 @@ function CompanyCard({ item, active, liveMembers, onSelect }) {
   const count = active && liveMembers != null
     ? liveMembers
     : (item.member_count ?? 0);
+  const tags = Array.isArray(item.tags) ? item.tags : (item.specialties || []);
+  const intro = item.intro || item.blurb || '';
   return (
     <button
       type="button"
@@ -29,6 +44,14 @@ function CompanyCard({ item, active, liveMembers, onSelect }) {
         </div>
         {active && <span className="co-card-pill">✨ 当前</span>}
       </div>
+      {intro ? <div className="co-card-intro">{intro}</div> : null}
+      {!!tags.length && (
+        <div className="co-card-tags">
+          {tags.slice(0, 6).map((t) => (
+            <span key={t} className="co-chip">{SPEC_LABELS[t] || t}</span>
+          ))}
+        </div>
+      )}
       <div className="co-card-foot">
         <span className="co-card-stat">
           <span className="co-stat-ico" aria-hidden>🐾</span>
@@ -66,6 +89,9 @@ export default function Companies({ company, agents, onSelectCompany, onToast })
   const [joinError, setJoinError] = useState('');
   const [invitePrompt, setInvitePrompt] = useState('');
   const [inviteLoading, setInviteLoading] = useState(false);
+  const [editIntro, setEditIntro] = useState('');
+  const [editTags, setEditTags] = useState('');
+  const [profileBusy, setProfileBusy] = useState(false);
   const [page, setPage] = useState(1);
   const [showJoin, setShowJoin] = useState(false);
   const [createPulse, setCreatePulse] = useState(false);
@@ -157,6 +183,18 @@ export default function Companies({ company, agents, onSelectCompany, onToast })
       .finally(() => { if (!cancelled) setInviteLoading(false); });
     return () => { cancelled = true; };
   }, [currentCode]);
+
+  useEffect(() => {
+    const sel = list.find((c) => c.code === currentCode);
+    if (!sel) {
+      setEditIntro('');
+      setEditTags('');
+      return;
+    }
+    setEditIntro(sel.intro || sel.blurb || '');
+    const tags = Array.isArray(sel.tags) ? sel.tags : (sel.specialties || []);
+    setEditTags(tags.join(', '));
+  }, [currentCode, list]);
 
   const pageItems = useMemo(() => {
     const start = (page - 1) * PAGE_SIZE;
@@ -266,6 +304,57 @@ export default function Companies({ company, agents, onSelectCompany, onToast })
   const memberCount = agents ? agents.length : 0;
   const selected = list.find((c) => c.code === currentCode)
     || (currentCode ? { code: currentCode, name: (company && company.name) || currentCode } : null);
+
+  const saveProfile = async () => {
+    if (!currentCode) return;
+    setProfileBusy(true);
+    try {
+      const tags = String(editTags || '')
+        .split(/[,，\s]+/)
+        .map((x) => x.trim())
+        .filter(Boolean);
+      const updated = await api.updateCompany(currentCode, {
+        intro: editIntro,
+        tags,
+      });
+      updateSavedCompany(currentCode, {
+        intro: updated.intro || editIntro,
+        tags: updated.tags || tags,
+        name: updated.name,
+      });
+      await loadCompanies(true);
+      toast('公司简介 / 擅长已保存');
+    } catch (e) {
+      toast('保存失败: ' + e.message, true);
+    } finally {
+      setProfileBusy(false);
+    }
+  };
+
+  const createProxyInvite = async () => {
+    if (!currentCode) return;
+    setProfileBusy(true);
+    try {
+      const tags = String(editTags || '')
+        .split(/[,，\s]+/)
+        .map((x) => x.trim())
+        .filter(Boolean);
+      const lead = (agents || []).find((a) => a.role === 'lead') || (agents || [])[0];
+      const inv = await api.createInvite({
+        specialties: tags.length ? tags : ['video_gen'],
+        from: lead ? lead.doorplate : undefined,
+      });
+      if (inv && inv.prompt) {
+        setInvitePrompt(inv.prompt);
+        updateSavedCompany(currentCode, { invite_prompt: inv.prompt, last_invite_id: inv.invite_id });
+      }
+      toast(`代企业入驻邀请已创建 ${inv.invite_id}`);
+    } catch (e) {
+      toast('创建邀请失败: ' + e.message, true);
+    } finally {
+      setProfileBusy(false);
+    }
+  };
 
   return (
     <div className="mt-tabpane">
@@ -408,6 +497,46 @@ export default function Companies({ company, agents, onSelectCompany, onToast })
             </nav>
           )}
         </>
+      )}
+
+      {selected && (
+        <section className="co-profile">
+          <header className="co-invite-head">
+            <div>
+              <div className="co-invite-title">简介 · 擅长标签</div>
+              <div className="co-invite-sub">企业资料会在公司列表展示；代企业入驻邀请会带上擅长标签</div>
+            </div>
+            <div className="co-invite-actions">
+              <button type="button" className="btn btn-sm" onClick={saveProfile} disabled={profileBusy}>
+                {profileBusy ? '保存中…' : '保存资料'}
+              </button>
+              <button type="button" className="btn btn-sm btn-ghost" onClick={createProxyInvite} disabled={profileBusy}>
+                代企业入驻邀请
+              </button>
+            </div>
+          </header>
+          <div className="field co-invite-field">
+            <label>简介</label>
+            <textarea
+              rows={3}
+              value={editIntro}
+              onChange={(e) => setEditIntro(e.target.value)}
+              placeholder="一句话介绍这家公司擅长什么…"
+              className="co-invite-ta"
+            />
+          </div>
+          <div className="field co-invite-field" style={{ marginTop: 10 }}>
+            <label>擅长标签（逗号分隔，如 video_gen, edit）</label>
+            <input
+              type="text"
+              value={editTags}
+              onChange={(e) => setEditTags(e.target.value)}
+              placeholder="video_gen, edit"
+              className="co-join-input"
+              style={{ width: '100%' }}
+            />
+          </div>
+        </section>
       )}
 
       {selected && (

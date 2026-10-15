@@ -34,6 +34,8 @@ export function saveCompanyLocal(entry) {
     created_at: entry.created_at || Date.now(),
     invite_prompt: entry.invite_prompt || '',
     member_count: entry.member_count,
+    intro: entry.intro || entry.blurb || '',
+    tags: Array.isArray(entry.tags) ? entry.tags : (entry.specialties || []),
   });
   localStorage.setItem(COMPANY_LIST_KEY, JSON.stringify(list));
   return list;
@@ -80,12 +82,43 @@ return data;
 export const api = {
 // 公司（列表来自 Worker D1，不再依赖本机 localStorage）
 listCompanies: () => request('/api/companies'),
-createCompany: (name) =>
-  request('/api/companies', 'POST', name != null && String(name).trim()
-    ? { name: String(name).trim() }
-    : {}),
+createCompany: (nameOrOpts) => {
+  let body = {};
+  if (typeof nameOrOpts === 'string' && nameOrOpts.trim()) body = { name: nameOrOpts.trim() };
+  else if (nameOrOpts && typeof nameOrOpts === 'object') body = { ...nameOrOpts };
+  return request('/api/companies', 'POST', body);
+},
+updateCompany: (code, patch) =>
+  request(`/api/companies/${encodeURIComponent(String(code).trim().toUpperCase())}`, 'PATCH', patch || {}),
 getCompanyInfo: (code) =>
   request(`/api/companies/${encodeURIComponent(code.trim().toUpperCase())}`),
+listReceipts: ({ doorplate, type = 'all', unread_only = false, mark_read = false } = {}) => {
+  const c = needCompany();
+  const q = new URLSearchParams({
+    doorplate,
+    company: c,
+    type,
+  });
+  if (unread_only) q.set('unread_only', '1');
+  if (mark_read) q.set('mark_read', '1');
+  return request(`/api/receipts?${q}`);
+},
+markReceiptRead: (receiptId, doorplate) =>
+  request(`/api/receipts/${encodeURIComponent(receiptId)}/read`, 'POST', {
+    doorplate,
+    company_code: needCompany(),
+  }),
+createInvite: ({ role, specialties, from, target_hint, note } = {}) =>
+  request('/api/invites', 'POST', {
+    company_code: needCompany(),
+    ...(role ? { role } : {}),
+    ...(specialties ? { specialties } : {}),
+    ...(from ? { from } : {}),
+    ...(target_hint ? { target_hint } : {}),
+    ...(note ? { note } : {}),
+  }),
+getInvite: (inviteId) => request(`/api/invites/${encodeURIComponent(inviteId)}`),
+
 /** 公司级续约：调度器用 workers-<code>.json 全部门牌号一次刷新心跳 */
 companyRenew: (code, doorplates, from) =>
   request(`/api/companies/${encodeURIComponent(String(code).trim().toUpperCase())}/renew`, 'POST', {
