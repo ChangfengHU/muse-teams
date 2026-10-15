@@ -105,12 +105,19 @@ body {
     align-items: stretch;
   }
   .mt-tabpane.lr .lr-den-head { grid-area: den; margin-bottom: 0; }
+  .mt-tabpane.lr .lr-roster {
+    grid-area: room;
+    align-self: start;
+    width: auto;
+    height: auto;
+    aspect-ratio: auto;
+  }
   .mt-tabpane.lr .room {
     grid-area: room;
     align-self: start;
     width: auto;
-    height: min(72vh, 620px);
-    aspect-ratio: 5 / 4;
+    height: auto;
+    aspect-ratio: auto;
   }
   .mt-tabpane.lr .board-wrap {
     grid-area: side;
@@ -224,7 +231,7 @@ body {
 /* ---------- 客厅场景 ---------- */
 /* 高度预算：1080p 首屏内房间 + 任务板/产物架第一行可见；小屏可滚动 */
 .mt-tabpane { display: flex; flex-direction: column; }
-.room { position: relative; height: clamp(420px, 52vh, 560px); border-radius: 22px; overflow: hidden; border: 1.5px solid var(--line);
+.room { position: relative; height: auto; min-height: 0; border-radius: 22px; overflow: hidden; border: 1.5px solid var(--line);
   background: linear-gradient(180deg, #FDFBF6 0%, #F8F1E3 42%, #F1E6D2 42.2%, #EBDCC2 100%);
   box-shadow: inset 0 0 60px rgba(185,138,94,.08); flex: 0 0 auto; }
 .wall-base { position: absolute; left: 0; right: 0; top: 42%; height: 8px; background: linear-gradient(180deg, #E4D3B4, #D9C6A2); opacity: .75; z-index: 1; }
@@ -241,134 +248,182 @@ body {
 .window-label { position: absolute; right: 18px; top: 34%; font-size: 10.5px; color: var(--muted); z-index: 4; background: rgba(255,255,255,.7); border-radius: 8px; padding: 2px 8px; }
 .desks, .desk, .rug, .room-label { display: none; } /* legacy; replaced by .lr-panel seats */
 
-/* ---- LivingRoom zone panels: roster seat grids (sm, 10–20 staff) ---- */
-.lr-room { display: flex; flex-direction: column; padding: 10px 12px 12px; gap: 8px; }
-.lr-panel {
+/* ---- LivingRoom: compact 毛怪座位 roster (obvious even with 1–2 agents) ---- */
+.lr-roster {
   position: relative;
-  border-radius: 16px;
-  border: 1.5px solid rgba(185,138,94,.22);
-  background: rgba(255,255,255,.48);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.65);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px 14px;
+  border-radius: 20px;
+  border: 1.5px solid var(--line);
+  background: var(--card);
+  box-shadow: 0 3px 0 rgba(233,226,212,.85), 0 10px 24px rgba(43,38,32,.04);
   overflow: hidden;
-  z-index: 3;
-  display: flex;
-  flex-direction: column;
+  height: auto;
   min-height: 0;
 }
-.lr-panel-work {
-  flex: 0 1 auto;
-  max-height: 46%;
-  background: linear-gradient(180deg, rgba(255,252,246,.78) 0%, rgba(247,236,214,.58) 100%);
+.lr-roster-door.door {
+  position: absolute;
+  left: 10px;
+  top: 10px;
+  width: 22px;
+  height: 36px;
+  opacity: .35;
+  pointer-events: none;
+  z-index: 1;
+  transform: scale(.55);
+  transform-origin: top left;
 }
-.lr-panel-wait {
-  flex: 1 1 auto;
-  min-height: 0;
-  background: linear-gradient(180deg, rgba(252,245,230,.55) 0%, rgba(243,223,194,.7) 100%);
-}
-.lr-panel-head {
+.lr-roster-door .door-sign { display: none; }
+.lr-roster-head {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-left: 18px; /* clear tiny door */
+  position: relative;
+  z-index: 2;
+}
+.lr-roster-title-wrap {
+  display: flex;
+  align-items: baseline;
   gap: 8px;
-  padding: 7px 12px 4px;
-  position: relative;
-  z-index: 4;
-  flex-shrink: 0;
-}
-.lr-panel-ico { font-size: 15px; }
-.lr-panel-title { font-size: 12.5px; font-weight: 800; color: var(--ink); }
-.lr-panel-count {
-  min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px;
-  background: #fff; border: 1px solid var(--line); color: var(--accent-dark);
-  font-size: 11.5px; font-weight: 800; display: inline-flex; align-items: center; justify-content: center;
-}
-.lr-panel-hint { margin-left: auto; font-size: 11px; color: var(--muted); font-weight: 600; }
-
-/* Seat grids — fixed columns, pack many agents, scroll when needed */
-.lr-seat-grid {
-  display: grid;
-  gap: 8px 6px;
-  padding: 6px 10px 10px;
-  align-content: start;
-  justify-items: center;
-  overflow-x: hidden;
-  overflow-y: auto;
-  min-height: 0;
-  flex: 1 1 auto;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(185,138,94,.35) transparent;
-}
-.lr-seat-grid-work {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  max-height: 210px;
-}
-.lr-seat-grid-wait {
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  max-height: 260px;
-  background:
-    radial-gradient(ellipse 90% 70% at 50% 55%, rgba(248,235,212,.55) 0%, transparent 72%);
-  border-radius: 0 0 14px 14px;
-}
-
-.lr-seat-cell {
-  position: relative;
-  z-index: 8;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  width: 100%;
-  max-width: 88px;
+  flex-wrap: wrap;
   min-width: 0;
 }
-.lr-seat-desk {
-  font-size: 13px;
-  line-height: 1;
-  margin-bottom: -2px;
-  opacity: .85;
-  filter: drop-shadow(0 1px 1px rgba(0,0,0,.1));
+.lr-roster-ico { font-size: 16px; }
+.lr-roster-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--ink);
 }
-.lr-seat-cell .mt-creature {
-  width: 64px;
+.lr-roster-sub {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
 }
-.lr-seat-ghost {
-  opacity: .38;
+.lr-roster-legend {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.lr-leg {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: #FBF8F1;
+  color: var(--muted);
+}
+.lr-leg-busy { color: #B85C38; border-color: rgba(217,119,87,.35); background: #FFF4EC; }
+.lr-leg-online { color: #3F7A4A; border-color: rgba(92,154,104,.35); background: #F1F8F2; }
+.lr-leg-off { color: #8A8175; }
+
+.lr-roster-row {
+  position: relative;
+  z-index: 2;
+  border-radius: 14px;
+  border: 1.5px solid rgba(185,138,94,.18);
+  background: #FBF8F1;
+  padding: 8px 10px 10px;
+}
+.lr-roster-row-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  font-size: 12.5px;
+  font-weight: 800;
+  color: var(--ink);
+}
+.lr-roster-row-label b {
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #fff;
+  border: 1px solid var(--line);
+  color: var(--accent-dark);
+  font-size: 11.5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.lr-roster-row-hint {
+  margin-left: 4px;
+  font-style: normal;
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--muted);
+}
+.lr-roster-row-ico { font-size: 13px; }
+
+.lr-roster-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px 6px;
+  align-items: start;
+  justify-items: center;
+}
+.lr-roster-seat {
+  width: 100%;
+  max-width: 72px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 0;
+}
+.lr-roster-seat .mt-creature { width: 52px; }
+.lr-roster-empty {
+  opacity: .55;
   pointer-events: none;
-  padding: 6px 0 4px;
+  padding-top: 2px;
 }
-.lr-ghost-pad {
-  width: 48px;
-  height: 48px;
+.lr-roster-pad {
+  width: 52px;
+  height: 52px;
   border-radius: 50%;
-  border: 1.5px dashed rgba(185,138,94,.45);
-  background: rgba(255,255,255,.45);
+  border: 1.5px dashed rgba(185,138,94,.42);
+  background: rgba(255,255,255,.7);
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 18px;
-  filter: grayscale(.25);
+  font-weight: 700;
+  color: rgba(185,138,94,.55);
+  box-sizing: border-box;
 }
-.lr-ghost-label {
+.lr-roster-pad-label {
   margin-top: 4px;
   font-size: 10px;
   color: var(--muted);
-  background: rgba(255,255,255,.65);
+  background: rgba(255,255,255,.75);
   border: 1px dashed var(--line);
   border-radius: 999px;
-  padding: 1px 8px;
-}
-.lr-wait-all-busy {
-  grid-column: 1 / -1;
-  justify-self: center;
-  margin: 18px 0 10px;
-  z-index: 3;
-  font-size: 12.5px;
-  color: var(--muted);
-  background: rgba(255,255,255,.78);
-  border: 1px dashed var(--line);
-  border-radius: 12px;
-  padding: 8px 14px;
-  text-align: center;
+  padding: 1px 7px;
 }
 
+.lr-roster-empty-banner {
+  text-align: center;
+  padding: 8px 12px 4px;
+  border-top: 1px dashed var(--line);
+}
+.lr-roster-empty-title {
+  font-size: 14px;
+  font-weight: 750;
+  margin-bottom: 2px;
+}
+.lr-roster-empty-sub {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+/* Legacy room chrome (door/window) kept for other pages / anim anchors only */
 /* 任务板 + 产物架：flex 纵向分配剩余视口高度，小屏保底可滚动 */
 .board-wrap { display: flex; gap: 14px; align-items: stretch; margin-top: 12px; flex: 1 0 auto; min-height: 220px; }
 .board { flex: 1 1 55%; position: relative; min-height: 240px; border-radius: 18px; border: 1px solid var(--line); background: repeating-linear-gradient(45deg, #FBF8F1, #FBF8F1 14px, #F7F1E4 14px, #F7F1E4 28px); overflow: hidden; }
@@ -1249,18 +1304,15 @@ body {
   .board-wrap { flex-direction: column; }
 }
 
-/* denser grid area for lr on wide but not ultra-wide */
 @media (min-width: 1100px) and (max-width: 1699px) {
-  .mt-tabpane.lr .room { height: clamp(440px, 50vh, 540px); }
   .mt-tabpane.lr .board-wrap { min-height: 200px; }
 }
+@media (max-width: 900px) {
+  .lr-roster-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+}
 @media (max-width: 700px) {
-  .room.lr-room { height: clamp(480px, 70vh, 640px); }
-  .lr-seat-grid-work { grid-template-columns: repeat(3, minmax(0, 1fr)); max-height: 240px; }
-  .lr-seat-grid-wait { grid-template-columns: repeat(4, minmax(0, 1fr)); max-height: 280px; }
-  .lr-seat-cell { max-width: 80px; }
+  .lr-roster-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
 @media (max-width: 480px) {
-  .lr-seat-grid-work { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .lr-seat-grid-wait { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .lr-roster-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }

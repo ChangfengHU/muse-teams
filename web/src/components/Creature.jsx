@@ -22,9 +22,9 @@ const Creature = forwardRef(function Creature(
   const st = agentStatus(agent);
   const cls = st === 'offline' ? 'offline' : st === 'busy' ? 'working' : 'idle';
   const stTxt = st === 'busy' ? '🏃 干活中' : st === 'offline' ? '💤 离线' : '🛋️ 等活儿';
-  const sizeCls = size === 'lg' ? ' lg' : size === 'sm' ? ' sm' : '';
+  const sizeCls = size === 'lg' ? ' lg' : size === 'xs' ? ' xs' : size === 'sm' ? ' sm' : '';
   const embedCls = embedded || (leftPct === 0 && topPct === 0) ? ' embedded' : '';
-  const avatarPx = size === 'lg' ? 152 : size === 'sm' ? 64 : 104;
+  const avatarPx = size === 'lg' ? 152 : size === 'xs' ? 52 : size === 'sm' ? 64 : 104;
 
   const setRefs = (el) => {
     rootRef.current = el;

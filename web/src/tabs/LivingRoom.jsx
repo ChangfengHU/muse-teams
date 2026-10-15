@@ -1,4 +1,4 @@
-// 客厅场景 —— 本公司窝：工作角落座 · 地毯歇脚 · 窗口飞任务 · 架子收宝贝
+// 客厅场景 —— 毛怪座位花名册 · 纸飞机任务板 · 产物架
 import React, { useRef, useEffect, useState, useCallback } from 'react';
 import Creature, { agentStatus } from '../components/Creature.jsx';
 import MonsterAvatar, { MonsterMini } from '../components/MonsterAvatar.jsx';
@@ -48,9 +48,13 @@ export default function LivingRoom({
   const coName = (company && company.name) || '本公司';
   const coCode = (company && company.code) || '';
 
-  const idle = agents.filter((a) => agentStatus(a) !== 'busy');
   const working = agents.filter((a) => agentStatus(a) === 'busy');
+  const waiting = agents.filter((a) => agentStatus(a) !== 'busy'); // online + offline
   const onlineN = agents.filter((a) => agentStatus(a) === 'online').length;
+  const busyN = working.length;
+  /** Pad each row so empty seat outlines always show (obvious grid even with 1–2 agents). */
+  const ROSTER_MIN_SEATS = 6;
+  const padSeats = (n) => Math.max(ROSTER_MIN_SEATS - n, n === 0 ? ROSTER_MIN_SEATS : 0);
   const pending = tasks.filter((t) => t.status === 'pending');
   const bp = boardSlots(pending.length);
   const doneTasks = tasks.filter((t) => t.status === 'done');
@@ -192,12 +196,13 @@ export default function LivingRoom({
               {coName}
               {coCode ? <code className="lr-den-code">{coCode}</code> : null}
             </h2>
-            <p className="lr-den-tagline">本窝毛怪在这儿歇着干活 · 纸飞机谁抢到算谁的（可跨公司）</p>
+            <p className="lr-den-tagline">本窝毛怪座位 · 纸飞机谁抢到算谁的（可跨公司）</p>
           </div>
         </div>
         <div className="lr-den-stats">
           <span className="lr-den-chip">毛怪 <b>{agents.length}</b></span>
           <span className="lr-den-chip">在线 <b>{onlineN}</b></span>
+          <span className="lr-den-chip">干活 <b>{busyN}</b></span>
           <span className={`lr-den-chip${reviewTasks.length ? ' hot' : ''}`}>待收 <b>{reviewTasks.length}</b></span>
           <span className="lr-den-chip">纸飞机 <b>{pending.length}</b></span>
           <span className="lr-den-chip">产物 <b>{artCount}</b></span>
@@ -208,88 +213,91 @@ export default function LivingRoom({
         </div>
       </div>
 
-      {/* 房间 —— 分区座位网格（sm），十几个也不挤 */}
-      <div className="room lr-room" ref={roomRef} id="room">
-        <div className="door" ref={doorRef} id="door">
+      {/* 毛怪座位 —— 紧凑花名册；空位轮廓常显，1–2 人也能看出网格 */}
+      <div className="lr-roster" ref={roomRef} id="room">
+        {/* 动画锚点：视觉上收成角标，不再撑成空房间 */}
+        <div className="door lr-roster-door" ref={doorRef} id="door" aria-hidden>
           <div className="door-frame" />
           <div className="door-panel"><div className="door-knob" /></div>
-          <div className="door-sign">🚪 推门进来</div>
         </div>
-        <div className="window"><div className="sun">☀️</div></div>
-        <div className="window-label">✈️ 任务飞进来</div>
-        <div className="wall-base" />
 
-        {/* 工作角 —— 4 列座位网格，sm 头像，可滚动 */}
-        <section className="lr-panel lr-panel-work" aria-label="工作角">
-          <header className="lr-panel-head">
-            <span className="lr-panel-ico" aria-hidden>🖥️</span>
-            <span className="lr-panel-title">工作角</span>
-            <span className="lr-panel-count">{working.length}</span>
-            <span className="lr-panel-hint">忙着干</span>
-          </header>
-          <div className="lr-seat-grid lr-seat-grid-work">
+        <header className="lr-roster-head">
+          <div className="lr-roster-title-wrap">
+            <span className="lr-roster-ico" aria-hidden>🐾</span>
+            <h3 className="lr-roster-title">毛怪座位</h3>
+            <span className="lr-roster-sub">{agents.length} 位 · 可跨公司抢单</span>
+          </div>
+          <div className="lr-roster-legend">
+            <span className="lr-leg lr-leg-busy">干活</span>
+            <span className="lr-leg lr-leg-online">在线</span>
+            <span className="lr-leg lr-leg-off">离线</span>
+          </div>
+        </header>
+
+        <section className="lr-roster-row" aria-label="干活">
+          <div className="lr-roster-row-label">
+            <span className="lr-roster-row-ico" aria-hidden>💻</span>
+            <span>干活</span>
+            <b>{working.length}</b>
+          </div>
+          <div className="lr-roster-grid">
             {working.map((a) => (
-              <div key={a.doorplate} className="lr-seat-cell">
-                <div className="lr-seat-desk" aria-hidden>💻</div>
+              <div key={a.doorplate} className="lr-roster-seat">
                 <Creature
                   ref={(el) => { if (el) creatureRefs.current[a.doorplate] = el; }}
                   agent={a}
                   leftPct={0}
                   topPct={0}
-                  size="sm"
+                  size="xs"
                   onSendMsg={onSendMsg}
                   onOpenMailbox={onOpenMailbox}
                 />
               </div>
             ))}
-            {working.length === 0 && emptySeats(4).map((i) => (
-              <div key={`we-${i}`} className="lr-seat-cell lr-seat-ghost" aria-hidden>
-                <div className="lr-ghost-pad">💻</div>
-                <div className="lr-ghost-label">空位</div>
+            {emptySeats(padSeats(working.length)).map((i) => (
+              <div key={`wb-${i}`} className="lr-roster-seat lr-roster-empty" aria-hidden>
+                <div className="lr-roster-pad">+</div>
+                <div className="lr-roster-pad-label">空位</div>
               </div>
             ))}
           </div>
         </section>
 
-        {/* 等候区 —— 5 列更密网格，sm 头像，可滚动 */}
-        <section className="lr-panel lr-panel-wait" aria-label="等候区">
-          <header className="lr-panel-head">
-            <span className="lr-panel-ico" aria-hidden>🛋️</span>
-            <span className="lr-panel-title">等候区</span>
-            <span className="lr-panel-count">{idle.length}</span>
-            <span className="lr-panel-hint">歇着</span>
-          </header>
-          <div className="lr-seat-grid lr-seat-grid-wait">
-            {idle.map((a) => (
-              <div key={a.doorplate} className="lr-seat-cell">
+        <section className="lr-roster-row" aria-label="在线等候">
+          <div className="lr-roster-row-label">
+            <span className="lr-roster-row-ico" aria-hidden>🟢</span>
+            <span>在线</span>
+            <b>{waiting.length}</b>
+            <em className="lr-roster-row-hint">等候抢单</em>
+          </div>
+          <div className="lr-roster-grid">
+            {waiting.map((a) => (
+              <div key={a.doorplate} className="lr-roster-seat">
                 <Creature
                   ref={(el) => { if (el) creatureRefs.current[a.doorplate] = el; }}
                   agent={a}
                   leftPct={0}
                   topPct={0}
-                  size="sm"
+                  size="xs"
                   look={hashStr(a.doorplate) % 2 === 0}
                   onSendMsg={onSendMsg}
                   onOpenMailbox={onOpenMailbox}
                 />
               </div>
             ))}
-            {idle.length === 0 && agents.length > 0 && (
-              <div className="lr-wait-all-busy">全员在干活，地毯空着晒太阳 ☀️</div>
-            )}
-            {idle.length === 0 && agents.length === 0 && emptySeats(5).map((i) => (
-              <div key={`wa-${i}`} className="lr-seat-cell lr-seat-ghost" aria-hidden>
-                <div className="lr-ghost-pad">🐾</div>
-                <div className="lr-ghost-label">空位</div>
+            {emptySeats(padSeats(waiting.length)).map((i) => (
+              <div key={`wa-${i}`} className="lr-roster-seat lr-roster-empty" aria-hidden>
+                <div className="lr-roster-pad">+</div>
+                <div className="lr-roster-pad-label">空位</div>
               </div>
             ))}
           </div>
         </section>
 
         {!agents.length && (
-          <div className="lr-room-empty">
-            <div className="lr-room-empty-title">本窝还没人</div>
-            <div className="lr-room-empty-sub">邀请一位毛怪注册到 {coName}，它会从这扇门推进来</div>
+          <div className="lr-roster-empty-banner">
+            <div className="lr-roster-empty-title">本窝还没人</div>
+            <div className="lr-roster-empty-sub">邀请毛怪注册到 {coName}，座位会亮起来</div>
             <button type="button" className="btn btn-sm" onClick={onOpenInvite}>🚪 邀请小伙伴</button>
           </div>
         )}
