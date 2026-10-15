@@ -251,6 +251,13 @@ CREATE TABLE IF NOT EXISTS invites (
   role_pack_id TEXT,
   role_pack_snapshot TEXT
 );
+CREATE TABLE IF NOT EXISTS task_assign (
+  task_id TEXT PRIMARY KEY,
+  assignee TEXT NOT NULL,
+  assigner_company TEXT,
+  created_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_task_assign_assignee ON task_assign(assignee);
 CREATE TABLE IF NOT EXISTS receipts (
   id TEXT PRIMARY KEY,
   type TEXT NOT NULL,
@@ -1202,6 +1209,142 @@ async function edgeAssertCompanyActive(db, code, verb) {
   assertCompanyActiveStatus(row.status, row.code, verb);
   return row;
 }
+
+/** Sticky-DO resilient direct assign: mark + enrich */
+async function edgeMarkTaskAssigned(db, taskId, assignee, assignerCompany) {
+  if (!db || !taskId) return;
+  await ensureD1Schema(db);
+  await d1Run(db,
+    "INSERT OR REPLACE INTO task_assign (task_id, assignee, assigner_company, created_at) VALUES (?, ?, ?, ?)",
+    taskId, assignee, assignerCompany || null, now()
+  );
+}
+
+async function edgeGetTaskAssigned(db, taskId) {
+  if (!db || !taskId) return null;
+  await ensureD1Schema(db);
+  return d1First(db, "SELECT task_id, assignee, assigner_company, created_at FROM task_assign WHERE task_id = ?", taskId);
+}
+
+async function edgeClearTaskAssigned(db, taskId) {
+  if (!db || !taskId) return;
+  await ensureD1Schema(db);
+  try { await d1Run(db, "DELETE FROM task_assign WHERE task_id = ?", taskId); } catch (_) {}
+}
+
+function enrichTaskAssigned(task, row) {
+  if (!task) return task;
+  if (task.assigned || task.dispatch_mode === "assign") return task;
+  if (!row) return task;
+  return { ...task, assigned: true, dispatch_mode: "assign" };
+}
+
+async function edgeResolveAgentByDoorplate(db, stub, base, doorplate) {
+  const raw = String(doorplate || "").trim();
+  if (!raw) throw new HttpError(400, "assign_to is required");
+  const dp = raw.toLowerCase();
+  await ensureD1Schema(db);
+  let row = await d1First(db, "SELECT doorplate, company_code, name FROM agents WHERE lower(doorplate) = ?", dp);
+  if (row) {
+    return { doorplate: row.doorplate, company: row.company_code, name: row.name || row.doorplate };
+  }
+  // Fallback: scan DO agents via companies in D1 (small N)
+  const companies = await listCompaniesFromD1(db);
+  for (const c of companies || []) {
+    if ((c.status || "active") !== "active") continue;
+    try {
+      const res = await withTimeout(stub.fetch(new Request(`${base}/api/agents?company=${encodeURIComponent(c.code)}`, { method: "GET" })), 2000);
+      const data = await res.json().catch(() => null);
+      const hit = ((data && data.agents) || []).find((a) => String(a.doorplate || "").toLowerCase() === dp);
+      if (hit) return { doorplate: hit.doorplate, company: hit.company || c.code, name: hit.name || hit.doorplate };
+    } catch (_) { /* continue */ }
+  }
+  throw new HttpError(404, `unknown agent: ${raw}`);
+}
+
+/**
+ * Direct-assign create: works even when DO is sticky on pre-assign_to code.
+ * Prefer native DO assign; else create pending + claim + D1 mark.
+ */
+async function edgeCreateTaskWithAssign(env, stub, base, body) {
+  const assignRaw = body && body.assign_to != null ? String(body.assign_to).trim() : "";
+  if (!assignRaw) {
+    const res = await stub.fetch(new Request(`${base}/api/tasks`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body || {}),
+    }));
+    const data = await res.json().catch(() => null);
+    return { status: res.status, data };
+  }
+  const publisher = String((body && body.company_code) || "").trim().toUpperCase();
+  if (!publisher) throw new HttpError(400, "需要 company_code（公司码）");
+  await edgeAssertCompanyActive(env.DB, publisher, "发单");
+  const agent = await edgeResolveAgentByDoorplate(env.DB, stub, base, assignRaw);
+  await edgeAssertCompanyActive(env.DB, agent.company, "直派（被派人公司）");
+
+  // Try native DO path (new code understands assign_to)
+  {
+    const res = await stub.fetch(new Request(`${base}/api/tasks`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body || {}),
+    }));
+    const data = await res.json().catch(() => null);
+    if (!res.ok) return { status: res.status, data };
+    const ownerMatch = data && data.owner && String(data.owner).toLowerCase() === String(agent.doorplate).toLowerCase();
+    if (data && data.status === "claimed" && ownerMatch) {
+      await edgeMarkTaskAssigned(env.DB, data.id, agent.doorplate, publisher);
+      // receipt for leads (native DO may already; edge ensures D1 receipts)
+      try {
+        await edgePushReceipt(env.DB, {
+          type: "claim_ok",
+          company: publisher,
+          to: agent.doorplate,
+          from: agent.doorplate,
+          ref: { task_id: data.id },
+          body: { task_id: data.id, title: data.title, claimer: agent.doorplate, claim_company: agent.company, assigned: true, dispatch_mode: "assign" },
+        });
+      } catch (_) {}
+      return { status: 200, data: enrichTaskAssigned(data, { task_id: data.id }) };
+    }
+    // Sticky DO ignored assign_to → claim now
+    if (data && data.status === "pending" && data.id) {
+      const cres = await stub.fetch(new Request(`${base}/api/tasks/${encodeURIComponent(data.id)}/claim`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ doorplate: agent.doorplate, company_code: agent.company }),
+      }));
+      const claimed = await cres.json().catch(() => null);
+      if (!cres.ok) {
+        return { status: cres.status, data: claimed || { ok: false, error: "直派认领失败", task: data } };
+      }
+      await edgeMarkTaskAssigned(env.DB, data.id, agent.doorplate, publisher);
+      try {
+        await edgePushReceipt(env.DB, {
+          type: "claim_ok",
+          company: publisher,
+          to: agent.doorplate,
+          from: agent.doorplate,
+          ref: { task_id: data.id },
+          body: {
+            task_id: data.id,
+            title: (claimed && claimed.title) || data.title,
+            claimer: agent.doorplate,
+            claim_company: agent.company,
+            assigned: true,
+            dispatch_mode: "assign",
+            cross_company: publisher !== agent.company,
+          },
+        });
+      } catch (_) {}
+      return { status: 200, data: enrichTaskAssigned(claimed || data, { task_id: data.id }) };
+    }
+    return { status: res.status, data };
+  }
+}
+
+
 
 /** Lead auth for edge lifecycle. Missing from → 403. Empty roster → 403 (no anonymous operator). */
 async function edgeRequireLead(db, code, from) {
@@ -3137,7 +3280,7 @@ const companyOf = (b) => (b && b.company_code) || query.get("company");
 
 // GET /api/health
 if (method === "GET" && r.length === 1 && r[0] === "health")
-return json({ ok: true, do_version: "2026-10-15-company-lifecycle-v2-enforce", has_task_trace: typeof this._taskTrace === "function", has_receipts: true, has_invites: true});
+return json({ ok: true, do_version: "2026-10-15-assign-to-v1", has_task_trace: typeof this._taskTrace === "function", has_receipts: true, has_invites: true, has_assign_to: true});
 
 // GET /api/invite?role=&company=
 if (method === "GET" && r.length === 1 && r[0] === "invite") {
@@ -3336,7 +3479,7 @@ return new Response(null, { status: 204, headers: {...CORS_HEADERS}});
 const url = new URL(request.url);
 // 边缘探针：不进 DO，确认 Worker 新版本已生效
 if (url.pathname === "/api/version-probe")
-return json({ edge_version: "2026-10-15-company-lifecycle-v2-enforce", ok: true, feature: "company_lifecycle_suspend_archive" });
+return json({ edge_version: "2026-10-15-assign-to-v1", ok: true, feature: "assign_to_direct_dispatch" });
 const id = env.TASK_QUEUE.idFromName("main");
 const stub = env.TASK_QUEUE.get(id);
 const base = `${url.protocol}//${url.host}`;
@@ -3451,6 +3594,17 @@ tools.push(TASK_TRACE_TOOL);
 }
 for (const t of EDGE_NEW_TOOLS) {
   if (!tools.some((x) => x && x.name === t.name)) tools.push(t);
+}
+// Ensure assign_to on teams_create_task even if sticky DO schema is old
+for (const t of tools) {
+  if (t && t.name === "teams_create_task") {
+    t.description = "Create a new task in YOUR company's task hall. 默认进广场 pending 供抢单；传 assign_to（门牌）则直派：立刻 claimed，跳过广场。Keywords: create, publish, assign, 发布任务, 直派.";
+    if (!t.inputSchema) t.inputSchema = { type: "object", properties: {}, required: ["title"] };
+    if (!t.inputSchema.properties) t.inputSchema.properties = {};
+    t.inputSchema.properties.assign_to = { type: "string", description: "Optional doorplate to assign immediately (claimed, skip plaza). 直派门牌，跳过抢单。Cross-company OK." };
+    if (!t.inputSchema.properties.task_type) t.inputSchema.properties.task_type = { type: "string", description: "general|video_gen|edit" };
+    if (!t.inputSchema.properties.prompts) t.inputSchema.properties.prompts = { description: "For video_gen: array or multiline prompts" };
+  }
 }
 if (data && data.result) data.result.tools = tools;
 return json(data);
@@ -3603,6 +3757,31 @@ if (body && body.method === "tools/call" && body.params) {
     } else if (tname === "teams_create_task") {
       const code = String(targs.company_code || "").trim().toUpperCase();
       if (code) await edgeAssertCompanyActive(env.DB, code, "发单");
+      if (targs.assign_to) {
+        // Resolve company from doorplate if only doorplate passed
+        let args = { ...targs };
+        if (!args.company_code && targs.doorplate) {
+          try {
+            const a = await edgeResolveAgentByDoorplate(env.DB, stub, base, targs.doorplate);
+            args.company_code = a.company;
+          } catch (_) {}
+        }
+        if (!args.company_code) {
+          return json({ jsonrpc: "2.0", id: rpcId, error: { code: -32602, message: "需要 company_code 或 doorplate" } });
+        }
+        try {
+          const out = await edgeCreateTaskWithAssign(env, stub, base, args);
+          if (out.status >= 400) {
+            return json({ jsonrpc: "2.0", id: rpcId, error: { code: -32602, message: (out.data && (out.data.error || out.data.message)) || "create failed" } });
+          }
+          return json({ jsonrpc: "2.0", id: rpcId, result: { content: [{ type: "text", text: JSON.stringify(out.data) }] } });
+        } catch (ce) {
+          if (ce instanceof HttpError) {
+            return json({ jsonrpc: "2.0", id: rpcId, error: { code: -32602, message: ce.message } });
+          }
+          throw ce;
+        }
+      }
     } else if (tname === "teams_register") {
       const code = String(targs.company_code || "").trim().toUpperCase();
       if (code) await edgeAssertCompanyActive(env.DB, code, "入驻/注册");
@@ -4069,6 +4248,9 @@ try {
               }
             } catch (_) {}
           } else if (action === "review") {
+            if (!body.approved) {
+              try { await edgeClearTaskAssigned(env.DB, taskId); } catch (_) {}
+            }
             const typ = body.approved ? "review_pass" : "review_reject";
             let owner = data.owner;
             if (!owner) {
@@ -4127,17 +4309,79 @@ try {
     return json(data, res.status);
   }
 
-  // Enrich single task GET with delivery envelope
+  // POST /api/tasks — edge assign_to (sticky-DO resilient)
+  if (url.pathname === "/api/tasks" && method === "POST") {
+    let body = null;
+    try { body = await request.json(); } catch (_) { body = {}; }
+    try {
+      if (body && body.assign_to) {
+        const out = await edgeCreateTaskWithAssign(env, stub, base, body);
+        return json(out.data, out.status);
+      }
+      // No assign_to: pass through; still enrich assigned=false consistently when DO new
+      const res = await stub.fetch(new Request(request.url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body || {}),
+      }));
+      let data = null;
+      try { data = await res.json(); } catch (_) {}
+      return json(data, res.status);
+    } catch (e) {
+      if (e instanceof HttpError) return json({ ok: false, error: e.message, ...(e.extra || {}) }, e.status);
+      throw e;
+    }
+  }
+
+  // Enrich single task GET with delivery envelope + assigned flag from D1
   {
     const m = url.pathname.match(/^\/api\/tasks\/([^/]+)$/);
     if (method === "GET" && m) {
+      const taskId = decodeURIComponent(m[1]);
       const res = await stub.fetch(request);
       let data = null;
       try { data = await res.json(); } catch (_) {}
       if (res.ok && data && data.result != null && !data.delivery) {
         data.delivery = buildDeliveryEnvelope(data);
       }
+      if (res.ok && data && env.DB) {
+        try {
+          const row = await edgeGetTaskAssigned(env.DB, taskId);
+          data = enrichTaskAssigned(data, row);
+        } catch (_) {}
+      }
       return json(data, res.status);
+    }
+  }
+
+  // Enrich plaza list with assigned flags
+  if (url.pathname === "/api/plaza" && method === "GET") {
+    const res = await stub.fetch(request);
+    let data = null;
+    try { data = await res.json(); } catch (_) {}
+    if (res.ok && data && Array.isArray(data.tasks) && env.DB) {
+      try {
+        await ensureD1Schema(env.DB);
+        const ids = data.tasks.map((t) => t && t.id).filter(Boolean);
+        if (ids.length) {
+          // D1 has no great IN bind helper — fetch rows one by one for small plaza pages
+          for (let i = 0; i < data.tasks.length; i++) {
+            const t = data.tasks[i];
+            if (!t || !t.id) continue;
+            const row = await edgeGetTaskAssigned(env.DB, t.id);
+            data.tasks[i] = enrichTaskAssigned(t, row);
+          }
+        }
+      } catch (_) {}
+    }
+    return json(data, res.status);
+  }
+
+  // Clear assign mark on reject (review approved=false)
+  {
+    const m = url.pathname.match(/^\/api\/tasks\/([^/]+)\/review$/);
+    if (method === "POST" && m) {
+      // fall through to existing review handler below if any; also clear after
     }
   }
 } catch (edgeErr) {
