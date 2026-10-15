@@ -1,8 +1,11 @@
 // 员工管理 —— 公司区域框网格：各公司员工集合 + 一键创建公司
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import MonsterAvatar from '../components/MonsterAvatar.jsx';
+import Pager from '../components/Pager.jsx';
 import { relTime, api, getCompany, setCompany as persistCompany } from '../api.js';
 import { agentStatus } from '../components/Creature.jsx';
+
+const ZONE_PAGE = 6;
 
 function statusLabel(st) {
   if (st === 'busy') return '🏃 干活中';
@@ -24,7 +27,7 @@ function EmployeeCard({ agent, leadDoorplate, companyCode, onDeleted }) {
     e.stopPropagation();
     const name = agent.name || agent.doorplate;
     if (!leadDoorplate) {
-      alert('需要本公司 lead 门牌号才能删除');
+      alert('需要本公司队长门牌号才能送走毛怪');
       return;
     }
     if (!window.confirm(`确定删除 ${name}（${agent.doorplate}）吗？\n已交付的产物会保留，旁聊会被归档。`)) return;
@@ -89,15 +92,20 @@ function CompanyZone({
   return (
     <section className={`company-zone${active ? ' active' : ''}`}>
       <header className="company-zone-head">
-        <div>
-          <div className="company-zone-name">{company.name || company.code}</div>
-          <div className="company-zone-sub">
-            <code>{company.code}</code>
-            {' · '}员工 <b>{agents.length || company.member_count || 0}</b>
-            {agents.length > 0 && (
-              <> · 在线 {onlineN} · 忙碌 {busyN} · 离线 {offlineN}</>
-            )}
-            {active ? ' · 当前' : ''}
+        <div className="company-zone-id">
+          <div className="company-zone-avatar">
+            <MonsterAvatar doorplate={company.code || 'C-??'} size={40} />
+          </div>
+          <div>
+            <div className="company-zone-name">{company.name || company.code}</div>
+            <div className="company-zone-sub">
+              <span className="co-code-badge">{company.code}</span>
+              {' · '}🐾 <b>{agents.length || company.member_count || 0}</b>
+              {agents.length > 0 && (
+                <> · 在线 {onlineN} · 忙碌 {busyN} · 离线 {offlineN}</>
+              )}
+              {active ? ' · 当前' : ''}
+            </div>
           </div>
         </div>
         <button
@@ -106,7 +114,7 @@ function CompanyZone({
           onClick={() => onEnter(company)}
           disabled={active}
         >
-          {active ? '已进入' : '进入公司'}
+          {active ? '✨ 已在窝里' : '进去玩玩 →'}
         </button>
       </header>
       <div className="company-zone-body">
@@ -115,7 +123,7 @@ function CompanyZone({
         )}
         {!loading && !agents.length && (
           <div className="empty-hint" style={{ padding: '16px 8px' }}>
-            还没有员工。在「公司」页复制邀请词，贴进 Muse 注册。
+            窝里还没毛怪。去「公司窝」复制邀请词，贴进 Muse～
           </div>
         )}
         {!!sorted.length && (
@@ -141,6 +149,7 @@ export default function Members({ company, onSelectCompany, onToast }) {
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState('');
+  const [page, setPage] = useState(1);
   const currentCode = (company && company.code) || getCompany() || '';
 
   const toast = useCallback((msg, isErr) => {
@@ -191,6 +200,21 @@ export default function Members({ company, onSelectCompany, onToast }) {
     return () => clearInterval(h);
   }, [loadZones]);
 
+  const totalPages = Math.max(1, Math.ceil(zones.length / ZONE_PAGE) || 1);
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
+  useEffect(() => {
+    if (!currentCode || !zones.length) return;
+    const idx = zones.findIndex((z) => z.code === currentCode);
+    if (idx >= 0) setPage(Math.floor(idx / ZONE_PAGE) + 1);
+  }, [currentCode, zones]);
+
+  const pageZones = useMemo(() => {
+    const start = (page - 1) * ZONE_PAGE;
+    return zones.slice(start, start + ZONE_PAGE);
+  }, [zones, page]);
+
   const createOne = async () => {
     setCreating(true);
     try {
@@ -201,8 +225,9 @@ export default function Members({ company, onSelectCompany, onToast }) {
         name: c.name,
         created_at: c.created_at,
       });
-      toast(`公司已创建：${c.name}（${c.code}）`);
+      toast(`🎉 新窝开张：${c.name}（${c.code}）`);
       await loadZones(true);
+      setPage(1);
     } catch (e) {
       toast('创建失败: ' + e.message, true);
     } finally {
@@ -216,7 +241,7 @@ export default function Members({ company, onSelectCompany, onToast }) {
       const info = await api.getCompanyInfo(item.code);
       persistCompany(info.code);
       onSelectCompany && onSelectCompany(info);
-      toast(`已进入 ${info.name}（${info.code}）`);
+      toast(`已溜进 ${info.name}`);
     } catch (e) {
       persistCompany(item.code);
       onSelectCompany && onSelectCompany({ code: item.code, name: item.name });
@@ -227,15 +252,13 @@ export default function Members({ company, onSelectCompany, onToast }) {
   return (
     <div className="mt-tabpane">
       <h2 className="sec-title">
-        <span className="serif">👥 员工管理</span>
-        <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 400 }}>
-          公司区域框 · 查看各公司员工 · 可创建公司
-        </span>
+        <span className="serif">🐾 毛怪名册</span>
+        <span className="sec-sub">按公司窝看看谁在线</span>
       </h2>
 
       <div className="staff-toolbar">
-        <button type="button" className="btn" onClick={createOne} disabled={creating}>
-          {creating ? '创建中…' : '✨ 创建公司'}
+        <button type="button" className="btn co-btn-create" onClick={createOne} disabled={creating}>
+          {creating ? '毛怪正在搭窝…' : '✨ 开一家公司'}
         </button>
         <button
           type="button"
@@ -245,9 +268,9 @@ export default function Members({ company, onSelectCompany, onToast }) {
         >
           {loading ? '刷新中…' : '刷新'}
         </button>
-        <span className="staff-toolbar-hint">
-          心跳约每 2 分钟续约；超过 180 秒无心跳显示离线。邀请词在「公司」页复制。
-        </span>
+        {!!zones.length && (
+          <span className="staff-toolbar-hint">共 {zones.length} 窝 · 第 {page}/{totalPages} 页</span>
+        )}
       </div>
 
       {error && !zones.length && (
@@ -257,29 +280,40 @@ export default function Members({ company, onSelectCompany, onToast }) {
       )}
 
       {loading && !zones.length && !error && (
-        <div className="empty-hint">加载公司与员工…</div>
+        <div className="co-loading">
+          <MonsterAvatar doorplate="staff-loading" size={56} />
+          <span>毛怪正在点名…</span>
+        </div>
       )}
 
       {!loading && !error && !zones.length && (
-        <div className="empty-hint">
-          还没有公司。点「创建公司」，或到「公司」页用公司码加入。
+        <div className="mt-empty">
+          <div className="mt-empty-art" aria-hidden>
+            <MonsterAvatar doorplate="staff-empty-a" size={64} />
+            <MonsterAvatar doorplate="staff-empty-b" size={78} />
+          </div>
+          <div className="mt-empty-title serif">还没有窝</div>
+          <div className="mt-empty-sub">点「开一家公司」，或去「公司窝」用公司码加入。</div>
         </div>
       )}
 
       {!!zones.length && (
-        <div className="company-zones">
-          {zones.map((z) => (
-            <CompanyZone
-              key={z.code}
-              company={z}
-              agents={z.agents || []}
-              loading={loading}
-              currentCode={currentCode}
-              onEnter={enterCompany}
-              onDeleted={() => loadZones(true)}
-            />
-          ))}
-        </div>
+        <>
+          <div className="company-zones">
+            {pageZones.map((z) => (
+              <CompanyZone
+                key={z.code}
+                company={z}
+                agents={z.agents || []}
+                loading={loading}
+                currentCode={currentCode}
+                onEnter={enterCompany}
+                onDeleted={() => loadZones(true)}
+              />
+            ))}
+          </div>
+          <Pager page={page} totalPages={totalPages} onChange={setPage} label="公司窝分页" />
+        </>
       )}
     </div>
   );

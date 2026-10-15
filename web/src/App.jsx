@@ -2,6 +2,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { api, getCompany, setCompany } from './api.js';
 import Sidebar from './components/Sidebar.jsx';
+import MonsterAvatar from './components/MonsterAvatar.jsx';
 import { PublishTaskModal, InviteModal, ArtifactModal } from './components/Modals.jsx';
 import LivingRoom from './tabs/LivingRoom.jsx';
 import Tasks from './tabs/Tasks.jsx';
@@ -160,40 +161,51 @@ export default function App() {
   };
 
   const needCompanyHint = (
-    <div className="empty-hint">先在「公司」里创建或选择公司，再来这边看客厅 / 任务 / 成员</div>
+    <div className="mt-empty">
+      <div className="mt-empty-art" aria-hidden>
+        <MonsterAvatar doorplate="need-co" size={72} />
+      </div>
+      <div className="mt-empty-title serif">先选一个公司窝</div>
+      <div className="mt-empty-sub">去左侧「公司窝」创建或加入，再回来看客厅和任务～</div>
+      <button type="button" className="btn co-btn-create" style={{ marginTop: 12 }} onClick={() => switchTab('companies')}>
+        去公司窝 →
+      </button>
+    </div>
   );
 
   return (
     <>
       <header className="topbar">
         <div className="logo">
-          <div className="logo-mark serif">M</div>
+          <div className="logo-mark serif" aria-hidden>M</div>
           <div>
             <div className="logo-name serif">Muse Teams</div>
-            <div className="logo-sub"><span className="mt-live-dot" />毛怪客厅 · live</div>
+            <div className="logo-sub"><span className="mt-live-dot" />毛怪协作窝 · live</div>
           </div>
         </div>
         {company ? (
           <div className="reg-pill" title="公司码：发给新成员入驻用">
-            🏢 {company.name} <code>{company.code}</code>
+            <MonsterAvatar doorplate={company.code} size={26} />
+            <span className="reg-pill-name">{company.name}</span>
+            <code>{company.code}</code>
             <button onClick={() => { try { navigator.clipboard.writeText(company.code); toast('公司码已复制 📋'); } catch (e) {} }}>复制码</button>
-            <button onClick={switchCompany} title="切换公司">切换</button>
+            <button onClick={switchCompany} title="切换公司">换窝</button>
           </div>
         ) : (
           <div className="reg-pill">
-            🏢 尚未选择公司
-            <button onClick={() => switchTab('companies')}>去创建</button>
+            还没进窝
+            <button onClick={() => switchTab('companies')}>开一家</button>
           </div>
         )}
         <div className="chips">
-          <span className="chip">🛋️ 等候 <b>{online}</b></span>
-          <span className="chip">✈️ 待领 <b>{pendingN}</b></span>
-          <span className={`chip${busy ? ' hot' : ''}`}>🏃 忙碌 <b>{busy}</b></span>
-          <span className={`chip${reviewN ? ' hot' : ''}`}>📦 交付 <b>{reviewN}</b></span>
+          <span className="chip">🛋️ 歇脚 <b>{online}</b></span>
+          <span className="chip">✈️ 纸飞机 <b>{pendingN}</b></span>
+          <span className={`chip${busy ? ' hot' : ''}`}>🏃 干活 <b>{busy}</b></span>
+          <span className={`chip${reviewN ? ' hot' : ''}`}>📦 待收 <b>{reviewN}</b></span>
         </div>
         <div className="top-actions">
           <button className="btn btn-sm btn-ghost" onClick={() => setShowInvite(true)} disabled={!company}>🚪 邀请</button>
-          <button className="btn btn-sm" onClick={() => setShowPublish(true)} disabled={!company}>📤 发布任务</button>
+          <button className="btn btn-sm" onClick={() => setShowPublish(true)} disabled={!company}>📤 扔纸飞机</button>
         </div>
       </header>
 

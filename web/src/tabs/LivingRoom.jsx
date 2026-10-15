@@ -189,12 +189,18 @@ export default function LivingRoom({ agents, tasks, feed, onToast, onRefresh, on
 
   return (
     <div className="mt-tabpane lr">
+      <div className="lr-hero">
+        <h2 className="sec-title" style={{ marginBottom: 0 }}>
+          <span className="serif">🏠 毛怪客厅</span>
+          <span className="sec-sub">地毯歇脚 · 窗口飞任务 · 架子收宝贝</span>
+        </h2>
+      </div>
       {/* 房间 */}
       <div className="room" ref={roomRef} id="room">
         <div className="door" ref={doorRef} id="door">
           <div className="door-frame" />
           <div className="door-panel"><div className="door-knob" /></div>
-          <div className="door-sign">🚪 新成员从这里进来</div>
+          <div className="door-sign">🚪 新毛怪从这里推门</div>
         </div>
         <div className="window"><div className="sun">☀️</div></div>
         <div className="window-label">✈️ 新任务从窗口飞进来</div>
@@ -247,7 +253,7 @@ export default function LivingRoom({ agents, tasks, feed, onToast, onRefresh, on
         })}
         {!agents.length && (
           <div className="room-label" style={{ left: '50%', top: '80%', transform: 'translateX(-50%)', cursor: 'pointer' }} onClick={onOpenInvite}>
-            🪑 客厅空空的，去邀请小伙伴来玩 →
+            🪑 客厅空空的，点这儿邀请小伙伴 →
           </div>
         )}
       </div>
@@ -256,7 +262,7 @@ export default function LivingRoom({ agents, tasks, feed, onToast, onRefresh, on
       <div className="board-wrap">
         <div className="board" ref={boardRef} id="board">
           <div className="board-title">📋 任务板</div>
-          {!pending.length && <div className="board-empty">🎉 板子空啦，去发布任务扔纸飞机吧</div>}
+          {!pending.length && <div className="board-empty">🎉 板子空啦，扔一张纸飞机吧</div>}
           {pending.map((t, i) => {
             const p = String(t.priority || 'P1').toLowerCase();
             const sp = bp[i];

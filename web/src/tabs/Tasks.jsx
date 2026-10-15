@@ -1,8 +1,12 @@
-// 任务 tab —— 分组列表 + 详情时间线 + 通过/打回
-import React, { useState } from 'react';
+// 任务 tab —— 卡通分组卡片 + 分页
+import React, { useState, useEffect, useMemo } from 'react';
 import { MonsterMini } from '../components/MonsterAvatar.jsx';
+import MonsterAvatar from '../components/MonsterAvatar.jsx';
+import Pager from '../components/Pager.jsx';
 import { api, relTime, fmtTime, durStr, stKey, ST_META } from '../api.js';
 import { artIcon, isImageArt } from '../components/Modals.jsx';
+
+const PAGE_SIZE = 8;
 
 function Timeline({ t }) {
   const steps = [
@@ -50,7 +54,7 @@ function TaskRow({ t, agents, onReview, onOpenArtifact, defaultOpen }) {
           <div className="dur">⏱ 耗时：{durStr((t.submitted_at || t.reviewed_at || t.done_at || Date.now()) - t.claimed_at)}</div>
         )}
         <div className="art-prev">
-          {!arts.length && <div style={{ fontSize: 12, color: 'var(--muted)' }}>暂无产物</div>}
+          {!arts.length && <div style={{ fontSize: 12, color: 'var(--muted)' }}>还没有产物哦</div>}
           {arts.map((a, i) => {
             const thumb = isImageArt(a) && a.url
               ? <img className="art-thumb" src={a.url} loading="lazy" onError={(e) => { e.target.style.display = 'none'; }} alt="" />
@@ -73,6 +77,29 @@ function TaskRow({ t, agents, onReview, onOpenArtifact, defaultOpen }) {
   );
 }
 
+function GroupBlock({ statusKey, list, agents, onReview, onOpenArtifact }) {
+  const [page, setPage] = useState(1);
+  const totalPages = Math.max(1, Math.ceil(list.length / PAGE_SIZE));
+  useEffect(() => { if (page > totalPages) setPage(totalPages); }, [page, totalPages]);
+  const slice = useMemo(() => {
+    const start = (page - 1) * PAGE_SIZE;
+    return list.slice(start, start + PAGE_SIZE);
+  }, [list, page]);
+
+  return (
+    <div className="st-group">
+      <div className="st-head">
+        {ST_META[statusKey].label}
+        <span className="cnt">{list.length}</span>
+      </div>
+      {slice.map((t) => (
+        <TaskRow key={t.id} t={t} agents={agents} onReview={onReview} onOpenArtifact={onOpenArtifact} />
+      ))}
+      <Pager page={page} totalPages={totalPages} onChange={setPage} label={`${statusKey} 分页`} />
+    </div>
+  );
+}
+
 export default function Tasks({ tasks, agents, onToast, onRefresh, onOpenArtifact, onCelebrate }) {
   const groups = ['pending', 'claimed', 'review', 'done', 'failed'];
   const byStatus = (k) => tasks.filter((t) => stKey(t) === k)
@@ -91,18 +118,32 @@ export default function Tasks({ tasks, agents, onToast, onRefresh, onOpenArtifac
 
   return (
     <div className="mt-tabpane">
-      <h2 className="sec-title"><span className="serif">📋 任务</span></h2>
-      {!tasks.length && <div className="empty-hint">还没有任务，去客厅发一张纸飞机吧 ✈️</div>}
+      <h2 className="sec-title">
+        <span className="serif">✈️ 任务板</span>
+        <span className="sec-sub">纸飞机飞进来 · 毛怪去叼走</span>
+      </h2>
+      {!tasks.length && (
+        <div className="mt-empty">
+          <div className="mt-empty-art" aria-hidden>
+            <MonsterAvatar doorplate="task-empty-a" size={64} />
+            <MonsterAvatar doorplate="task-empty-b" size={78} />
+          </div>
+          <div className="mt-empty-title serif">板子空空的</div>
+          <div className="mt-empty-sub">右上角「发布任务」扔一张纸飞机，客厅窗口会飞进来～</div>
+        </div>
+      )}
       {groups.map((k) => {
         const list = byStatus(k);
         if (!list.length) return null;
         return (
-          <div key={k} className="st-group">
-            <div className="st-head">{ST_META[k].label}<span className="cnt">{list.length}</span></div>
-            {list.map((t) => (
-              <TaskRow key={t.id} t={t} agents={agents} onReview={handleReview} onOpenArtifact={onOpenArtifact} />
-            ))}
-          </div>
+          <GroupBlock
+            key={k}
+            statusKey={k}
+            list={list}
+            agents={agents}
+            onReview={handleReview}
+            onOpenArtifact={onOpenArtifact}
+          />
         );
       })}
     </div>

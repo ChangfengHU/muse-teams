@@ -1,11 +1,11 @@
-// 左侧 tab 导航
+// 左侧 tab 导航 —— 卡通圆角 + 选中发光
 import React from 'react';
 
 const TABS = [
-  { key: 'companies', icon: '🏢', label: '公司' },
+  { key: 'companies', icon: '🏢', label: '公司窝' },
   { key: 'home', icon: '🏠', label: '客厅' },
-  { key: 'tasks', icon: '📋', label: '任务' },
-  { key: 'agents', icon: '👥', label: '员工' },
+  { key: 'tasks', icon: '✈️', label: '任务' },
+  { key: 'agents', icon: '🐾', label: '毛怪' },
   { key: 'arts', icon: '📦', label: '产物' },
   { key: 'feed', icon: '📻', label: '动态' },
 ];
@@ -13,9 +13,11 @@ const TABS = [
 export default function Sidebar({ tab, onSwitch }) {
   return (
     <nav className="sidebar">
+      <div className="sidebar-cap" aria-hidden>✨</div>
       {TABS.map((t) => (
         <button
           key={t.key}
+          type="button"
           className={`side-tab${tab === t.key ? ' active' : ''}`}
           onClick={() => onSwitch(t.key)}
         >
