@@ -14,7 +14,7 @@ export function agentStatus(a) {
 }
 
 const Creature = forwardRef(function Creature(
-  { agent, leftPct, topPct, look = false, onSendMsg, onOpenMailbox },
+  { agent, leftPct, topPct, look = false, size = 'md', embedded = false, onSendMsg, onOpenMailbox },
   ref
 ) {
   const [bubbleOpen, setBubbleOpen] = useState(false);
@@ -22,6 +22,9 @@ const Creature = forwardRef(function Creature(
   const st = agentStatus(agent);
   const cls = st === 'offline' ? 'offline' : st === 'busy' ? 'working' : 'idle';
   const stTxt = st === 'busy' ? '🏃 干活中' : st === 'offline' ? '💤 离线' : '🛋️ 等活儿';
+  const sizeCls = size === 'lg' ? ' lg' : size === 'sm' ? ' sm' : '';
+  const embedCls = embedded || (leftPct === 0 && topPct === 0) ? ' embedded' : '';
+  const avatarPx = size === 'lg' ? 152 : size === 'sm' ? 72 : 104;
 
   const setRefs = (el) => {
     rootRef.current = el;
@@ -48,17 +51,21 @@ const Creature = forwardRef(function Creature(
     };
   }, [bubbleOpen]);
 
+  const posStyle = embedCls
+    ? undefined
+    : { left: leftPct + '%', top: topPct + '%' };
+
   return (
     <div
       ref={setRefs}
-      className={`mt-creature ${cls}`}
+      className={`mt-creature ${cls}${sizeCls}${embedCls}`}
       data-doorplate={agent.doorplate}
-      style={{ left: leftPct + '%', top: topPct + '%' }}
+      style={posStyle}
       onClick={() => setBubbleOpen((v) => !v)}
     >
       <div className="mt-c-excl">!</div>
       <div className={`mt-c-inner${look ? ' look' : ''}`}>
-        <MonsterAvatar doorplate={agent.doorplate} />
+        <MonsterAvatar doorplate={agent.doorplate} size={avatarPx} />
         <div className="mt-paws" />
         {st === 'busy' && <div className="mt-pdots">...</div>}
         <div className="mt-zzz"><span>z</span><span>z</span><span>z</span></div>
