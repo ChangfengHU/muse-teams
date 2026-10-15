@@ -13,32 +13,6 @@ function hashStr(s) {
   return h >>> 0;
 }
 
-/** 等候区座位：最多 2 行 × 4 列，永不重叠 */
-function waitSlotStyle(i, n) {
-  const cols = Math.min(4, Math.max(n, 1));
-  const row = Math.floor(i / cols);
-  const col = i % cols;
-  const inRow = Math.min(cols, Math.max(n - row * cols, 1));
-  const gap = 100 / (inRow + 1);
-  return {
-    left: `${gap * (col + 1)}%`,
-    top: row === 0 ? '28%' : '68%',
-    transform: 'translate(-50%, -50%)',
-  };
-}
-
-/** 工作角座位：一排最多 4 席 */
-function workSlotStyle(i, n) {
-  const seats = Math.min(Math.max(n, 1), 4);
-  const gap = 100 / (seats + 1);
-  const idx = i % 4;
-  return {
-    left: `${gap * (idx + 1)}%`,
-    top: '58%',
-    transform: 'translate(-50%, -50%)',
-  };
-}
-
 function boardSlots(n) {
   const pos = [];
   for (let i = 0; i < n; i++) pos.push({ x: 6 + (i % 2) * 46, y: 12 + Math.floor(i / 2) * 30 });
@@ -234,7 +208,7 @@ export default function LivingRoom({
         </div>
       </div>
 
-      {/* 房间 —— 分区落座，毛怪是主角 */}
+      {/* 房间 —— 分区座位网格（sm），十几个也不挤 */}
       <div className="room lr-room" ref={roomRef} id="room">
         <div className="door" ref={doorRef} id="door">
           <div className="door-frame" />
@@ -245,7 +219,7 @@ export default function LivingRoom({
         <div className="window-label">✈️ 任务飞进来</div>
         <div className="wall-base" />
 
-        {/* 工作角 */}
+        {/* 工作角 —— 4 列座位网格，sm 头像，可滚动 */}
         <section className="lr-panel lr-panel-work" aria-label="工作角">
           <header className="lr-panel-head">
             <span className="lr-panel-ico" aria-hidden>🖥️</span>
@@ -253,40 +227,31 @@ export default function LivingRoom({
             <span className="lr-panel-count">{working.length}</span>
             <span className="lr-panel-hint">忙着干</span>
           </header>
-          <div className="lr-work-stage">
-            <div className="lr-desk-bench" aria-hidden>
-              <div className="lr-bench-top" />
-              <div className="lr-bench-leg l" />
-              <div className="lr-bench-leg r" />
-            </div>
-            {working.length === 0 && (
-              <div className="lr-seat-empty-row">
-                {emptySeats(2).map((i) => (
-                  <div key={`we-${i}`} className="lr-seat-ghost" style={workSlotStyle(i, 2)}>
-                    <div className="lr-ghost-laptop">💻</div>
-                    <div className="lr-ghost-label">空位</div>
-                  </div>
-                ))}
-              </div>
-            )}
-            {working.map((a, i) => (
-              <div key={a.doorplate} className="lr-seat lr-seat-work" style={workSlotStyle(i, working.length)}>
-                <div className="lr-seat-laptop" aria-hidden>💻</div>
+          <div className="lr-seat-grid lr-seat-grid-work">
+            {working.map((a) => (
+              <div key={a.doorplate} className="lr-seat-cell">
+                <div className="lr-seat-desk" aria-hidden>💻</div>
                 <Creature
                   ref={(el) => { if (el) creatureRefs.current[a.doorplate] = el; }}
                   agent={a}
                   leftPct={0}
                   topPct={0}
-                  size="lg"
+                  size="sm"
                   onSendMsg={onSendMsg}
                   onOpenMailbox={onOpenMailbox}
                 />
               </div>
             ))}
+            {working.length === 0 && emptySeats(4).map((i) => (
+              <div key={`we-${i}`} className="lr-seat-cell lr-seat-ghost" aria-hidden>
+                <div className="lr-ghost-pad">💻</div>
+                <div className="lr-ghost-label">空位</div>
+              </div>
+            ))}
           </div>
         </section>
 
-        {/* 等候区 */}
+        {/* 等候区 —— 5 列更密网格，sm 头像，可滚动 */}
         <section className="lr-panel lr-panel-wait" aria-label="等候区">
           <header className="lr-panel-head">
             <span className="lr-panel-ico" aria-hidden>🛋️</span>
@@ -294,26 +259,28 @@ export default function LivingRoom({
             <span className="lr-panel-count">{idle.length}</span>
             <span className="lr-panel-hint">歇脚中</span>
           </header>
-          <div className="lr-wait-stage">
-            <div className="lr-rug-oval" aria-hidden />
-            <div className="lr-sofa-sil" aria-hidden>
-              <span /><span /><span />
-            </div>
-            {idle.length === 0 && agents.length > 0 && (
-              <div className="lr-wait-all-busy">全员在干活，地毯空着晒太阳 ☀️</div>
-            )}
-            {idle.map((a, i) => (
-              <div key={a.doorplate} className="lr-seat lr-seat-wait" style={waitSlotStyle(i, idle.length)}>
+          <div className="lr-seat-grid lr-seat-grid-wait">
+            {idle.map((a) => (
+              <div key={a.doorplate} className="lr-seat-cell">
                 <Creature
                   ref={(el) => { if (el) creatureRefs.current[a.doorplate] = el; }}
                   agent={a}
                   leftPct={0}
                   topPct={0}
-                  size="lg"
+                  size="sm"
                   look={hashStr(a.doorplate) % 2 === 0}
                   onSendMsg={onSendMsg}
                   onOpenMailbox={onOpenMailbox}
                 />
+              </div>
+            ))}
+            {idle.length === 0 && agents.length > 0 && (
+              <div className="lr-wait-all-busy">全员在干活，地毯空着晒太阳 ☀️</div>
+            )}
+            {idle.length === 0 && agents.length === 0 && emptySeats(5).map((i) => (
+              <div key={`wa-${i}`} className="lr-seat-cell lr-seat-ghost" aria-hidden>
+                <div className="lr-ghost-pad">🐾</div>
+                <div className="lr-ghost-label">空位</div>
               </div>
             ))}
           </div>

@@ -24,7 +24,7 @@ const Creature = forwardRef(function Creature(
   const stTxt = st === 'busy' ? '🏃 干活中' : st === 'offline' ? '💤 离线' : '🛋️ 等活儿';
   const sizeCls = size === 'lg' ? ' lg' : size === 'sm' ? ' sm' : '';
   const embedCls = embedded || (leftPct === 0 && topPct === 0) ? ' embedded' : '';
-  const avatarPx = size === 'lg' ? 152 : size === 'sm' ? 72 : 104;
+  const avatarPx = size === 'lg' ? 152 : size === 'sm' ? 64 : 104;
 
   const setRefs = (el) => {
     rootRef.current = el;
