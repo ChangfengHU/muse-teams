@@ -30,7 +30,21 @@ function loadConfiguredTargets(env) {
   return null;
 }
 
-/** Prefer fleet lanes that currently have Muse logged in. Never triggers heal/swap. */
+/** Live /api/fleet: identities.muse==="in" OR museStatus==="logged_in". Never heal/swap. */
+function isMuseLoggedIn(b) {
+  if (!b || typeof b !== "object") return false;
+  if (b.needsMuse || b.withoutMuse) return false;
+  if (b.museStatus === "logged_in") return true;
+  if (b.identities && (b.identities.muse === "in" || b.identities.muse === true)) return true;
+  if (b.muse === true || b.museLoggedIn === true || b.hasMuse === true) return true;
+  if (b.engines && b.engines.muse && (b.engines.muse.ok || b.engines.muse.loggedIn)) return true;
+  if (b.accountBound === "muse") return true;
+  if (Array.isArray(b.engines) && b.engines.includes("muse")) return true;
+  if ((b.labels || []).includes?.("muse")) return true;
+  if (b.museSession || b.museEmail || b.muse_user) return true;
+  return false;
+}
+
 async function discoverLoggedInMuseTargets(env) {
   const fleetUrl = env.FLEET_API_URL || env.FLEET_LIST_URL;
   if (!fleetUrl) return null;
@@ -38,36 +52,42 @@ async function discoverLoggedInMuseTargets(env) {
     const res = await fetch(fleetUrl, {
       headers: {
         accept: "application/json",
-        "user-agent": "muse-teams-invite/0.2",
+        "user-agent": "muse-teams-invite/0.3",
         ...(env.FLEET_API_TOKEN ? { authorization: `Bearer ${env.FLEET_API_TOKEN}` } : {}),
       },
     });
     if (!res.ok) return null;
     const data = await res.json().catch(() => null);
     const browsers = [];
-    const pushBrowser = (b, host) => {
-      if (!b || typeof b !== "object") return;
-      const museOk =
-        b.muse === true ||
-        b.museLoggedIn === true ||
-        b.hasMuse === true ||
-        (b.engines && b.engines.muse && (b.engines.muse.ok || b.engines.muse.loggedIn)) ||
-        b.accountBound === "muse" ||
-        (Array.isArray(b.engines) && b.engines.includes("muse"));
-      // Skip browsersWithoutMuse style
-      if (b.needsMuse || b.withoutMuse) return;
-      if (!museOk && !(b.labels || []).includes?.("muse")) {
-        // If fleet marks museSession / museEmail, treat as logged-in
-        if (!(b.museSession || b.museEmail || b.muse_user)) return;
-      }
-      const id = b.id || b.browserId || `${host || "host"}-${b.port || b.cdp || b.slot || browsers.length}`;
+    const pushBrowser = (b, node) => {
+      if (!isMuseLoggedIn(b)) return;
+      const nodeId = (node && (node.id || node.host)) || null;
+      const serviceBase = (node && (node.serviceBase || node.service_base)) || b.serviceBase || null;
+      const browserNo = b.browserNo != null ? Number(b.browserNo) : null;
+      const instance = browserNo != null && Number.isFinite(browserNo)
+        ? browserNo
+        : Number(b.instance ?? b.port ?? NaN);
+      const id =
+        b.id ||
+        b.browserId ||
+        (nodeId != null && browserNo != null ? `${nodeId}@${browserNo}` : null) ||
+        `${nodeId || "host"}-${b.port || b.cdp || b.cdpPort || b.slot || browsers.length}`;
+      const host = serviceBase || (node && (node.host || node.id)) || b.host || null;
+      const museLabel =
+        (b.accounts && b.accounts.muse && (b.accounts.muse.label || b.accounts.muse.email)) ||
+        null;
       browsers.push({
         id: String(id),
-        label: b.label || b.name || `Muse lane ${id}`,
+        label: b.label || b.name || museLabel || `Muse lane ${id}`,
         kind: "muse_linux",
         status: "logged_in",
-        host: host || b.host || null,
-        port: b.port || b.cdp || null,
+        host,
+        serviceBase: serviceBase || (typeof host === "string" && /imggen-/i.test(host) ? host : null),
+        port: Number.isFinite(instance) ? instance : b.port || null,
+        instance: Number.isFinite(instance) ? instance : null,
+        browserNo: browserNo,
+        cdpPort: b.cdpPort || b.cdp || null,
+        node_id: nodeId,
         deliverable: true,
       });
     };
@@ -75,16 +95,16 @@ async function discoverLoggedInMuseTargets(env) {
     if (Array.isArray(data)) {
       for (const b of data) pushBrowser(b, null);
     } else if (data && Array.isArray(data.browsers)) {
-      for (const b of data.browsers) pushBrowser(b, data.host);
+      for (const b of data.browsers) pushBrowser(b, { host: data.host, serviceBase: data.serviceBase, id: data.id });
     } else if (data && Array.isArray(data.nodes)) {
       for (const n of data.nodes) {
         const list = n.browsers || n.lanes || [];
-        for (const b of list) pushBrowser(b, n.host || n.id);
+        for (const b of list) pushBrowser(b, n);
       }
     } else if (data && data.engines && data.engines.muse) {
       const muse = data.engines.muse;
       const withMuse = muse.browsers || muse.lanes || [];
-      for (const b of withMuse) pushBrowser({ ...b, muse: true }, null);
+      for (const b of withMuse) pushBrowser({ ...b, muse: true, museStatus: "logged_in" }, null);
     }
     return browsers;
   } catch (_) {
@@ -171,7 +191,7 @@ const TOOLS = [
   {
     name: "invite_deliver",
     description:
-      "Deliver a prompt to a logged-in Muse lane target. Accepts invite_id (fetch invite.prompt) OR prompt+kind (invite|suspend|archive|resume). Refuses non-deliverable / non-logged-in targets. Injection into Muse session may still be stubbed; attempt is recorded.",
+      "Deliver a prompt to a logged-in Muse lane target. Accepts invite_id (fetch invite.prompt) OR prompt+kind (invite|suspend|archive|resume). Refuses non-deliverable / non-logged-in targets. Preferred inject: POST target.serviceBase/browser/run with Bearer IMGGEN_TOKEN (same Muse channel as 生图 MCP); MUSE_INJECT_URL remains an optional adapter override.",
     inputSchema: {
       type: "object",
       properties: {
@@ -248,6 +268,102 @@ async function teamsListReceipts(api, { doorplate, company_code, type = "invite_
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
+}
+
+
+const MUSE_COMPOSER_SELECTOR = 'textarea[aria-label="Message"], textarea[placeholder="Message"]';
+
+function imggenServiceBase(target) {
+  const base = String(target.serviceBase || target.host || "").replace(/\/$/, "");
+  if (base && /^https?:\/\/imggen-[^/]+/i.test(base)) return base;
+  return null;
+}
+
+/** Same channel as 生图 MCP sibling: POST {serviceBase}/browser/run with IMGGEN_TOKEN (not /generate). */
+async function injectViaBrowserRun(env, target, prompt) {
+  const serviceBase = imggenServiceBase(target);
+  if (!serviceBase) return null;
+  const instance = Number(target.instance ?? target.port ?? target.browserNo);
+  if (!Number.isFinite(instance)) {
+    return { ok: false, error: "target missing browser instance/browserNo for /browser/run" };
+  }
+  const token = env.IMGGEN_TOKEN;
+  if (!token) {
+    return { ok: false, error: "IMGGEN_TOKEN required to POST imggen /browser/run" };
+  }
+  const actions = [
+    { op: "goto", url: "https://muse.ai/", timeout: 60000 },
+    { op: "waitFor", selector: MUSE_COMPOSER_SELECTOR, timeout: 30000 },
+    { op: "type", selector: MUSE_COMPOSER_SELECTOR, text: String(prompt) },
+    {
+      op: "eval",
+      expr: (() => {
+        const sel = JSON.stringify(MUSE_COMPOSER_SELECTOR);
+        return `(() => { const t = document.querySelector(${sel}); if (!t) return { ok: false, reason: 'no composer' }; t.focus(); t.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true })); return { ok: true }; })()`;
+      })(),
+    },
+  ];
+  try {
+    const ir = await fetch(`${serviceBase}/browser/run`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+        "user-agent": "muse-teams-invite/0.3",
+      },
+      body: JSON.stringify({ instance, actions }),
+    });
+    const bodyText = await ir.text().catch(() => "");
+    let bodyJson = null;
+    try {
+      bodyJson = JSON.parse(bodyText);
+    } catch (_) { /* keep text */ }
+    return {
+      ok: ir.ok,
+      channel: "imggen_browser_run",
+      url: `${serviceBase}/browser/run`,
+      instance,
+      http: ir.status,
+      body: bodyJson || bodyText.slice(0, 2000),
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      channel: "imggen_browser_run",
+      url: `${serviceBase}/browser/run`,
+      instance,
+      error: e.message || String(e),
+    };
+  }
+}
+
+async function injectViaAdapterUrl(env, target, { prompt, kind, invite_id, company_code, target_id }) {
+  if (!env.MUSE_INJECT_URL) return null;
+  try {
+    const ir = await fetch(env.MUSE_INJECT_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json", "user-agent": "muse-teams-invite/0.3" },
+      body: JSON.stringify({
+        target_id,
+        host: target.host,
+        port: target.port,
+        instance: target.instance ?? target.port,
+        serviceBase: target.serviceBase || null,
+        kind,
+        company_code: company_code || null,
+        invite_id,
+        prompt,
+      }),
+    });
+    return {
+      ok: ir.ok,
+      channel: "muse_inject_url",
+      http: ir.status,
+      body: await ir.text().catch(() => ""),
+    };
+  } catch (e) {
+    return { ok: false, channel: "muse_inject_url", error: e.message || String(e) };
+  }
 }
 
 function getLog() {
@@ -338,28 +454,32 @@ async function callTool(env, name, args = {}) {
       if (!prompt) throw new Error("prompt required (or invite_id to fetch)");
       kind = kind || "invite";
       const delivery_id = `D-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      // Session inject: still stub at transport layer; receipt records intent for logged-in lane.
-      const inject_status = env.MUSE_INJECT_URL ? "inject_attempted" : "recorded_pending_inject";
-      let inject_detail = null;
-      if (env.MUSE_INJECT_URL) {
-        try {
-          const ir = await fetch(env.MUSE_INJECT_URL, {
-            method: "POST",
-            headers: { "content-type": "application/json", "user-agent": "muse-teams-invite/0.2" },
-            body: JSON.stringify({
-              target_id: args.target_id,
-              host: target.host,
-              port: target.port,
-              kind,
-              company_code: args.company_code || null,
-              invite_id,
-              prompt,
-            }),
-          });
-          inject_detail = { http: ir.status, body: await ir.text().catch(() => "") };
-        } catch (e) {
-          inject_detail = { error: e.message || String(e) };
-        }
+      // Preferred: same Muse channel as 生图 — POST imggen-*/browser/run + IMGGEN_TOKEN.
+      // Optional override: MUSE_INJECT_URL adapter (legacy stub schema).
+      let inject_detail =
+        (await injectViaBrowserRun(env, target, prompt)) ||
+        (await injectViaAdapterUrl(env, target, {
+          prompt,
+          kind,
+          invite_id,
+          company_code: args.company_code || null,
+          target_id: args.target_id,
+        }));
+      let inject_status;
+      let note;
+      if (!inject_detail) {
+        inject_status = "recorded_pending_inject";
+        note =
+          "Target is logged-in-eligible but has no imggen serviceBase and MUSE_INJECT_URL is unset. Set FLEET_API_URL + IMGGEN_TOKEN for /browser/run.";
+      } else if (inject_detail.ok) {
+        inject_status = "injected";
+        note =
+          inject_detail.channel === "imggen_browser_run"
+            ? "Injected via imggen /browser/run (same channel as 生图 MCP text path)."
+            : "Inject endpoint (MUSE_INJECT_URL) called.";
+      } else {
+        inject_status = "inject_failed";
+        note = inject_detail.error || `Inject failed (http=${inject_detail.http})`;
       }
       const record = {
         delivery_id,
@@ -372,10 +492,7 @@ async function callTool(env, name, args = {}) {
         prompt_preview: String(prompt || "").slice(0, 240),
         at: Date.now(),
         inject_detail,
-        note:
-          inject_status === "recorded_pending_inject"
-            ? "Target is logged-in-eligible; set MUSE_INJECT_URL to wire Muse session inject (same pattern as image-gen delivery)."
-            : "Inject endpoint called.",
+        note,
       };
       deliveryLog.set(delivery_id, record);
       return record;
@@ -421,7 +538,7 @@ async function handleRpc(env, msg) {
       return ok(id, {
         protocolVersion: "2024-11-05",
         capabilities: { tools: {} },
-        serverInfo: { name: "muse-teams-invite", version: "0.2.0" },
+        serverInfo: { name: "muse-teams-invite", version: "0.3.0" },
       });
     }
     if (msg.method === "notifications/initialized") return ok(id, {});
@@ -454,11 +571,11 @@ export default {
       return json({
         ok: true,
         service: "muse-teams-invite",
-        version: "0.2.0",
+        version: "0.3.0",
         mcp: "POST /invite-mcp (or POST /) streamable-http JSON-RPC",
         tools: TOOLS.map((t) => t.name),
         teams_api: env.TEAMS_API_URL || TEAMS_API_DEFAULT,
-        note: "deliver requires logged-in Muse lanes; session inject optional via MUSE_INJECT_URL",
+        note: "deliver posts to imggen-*/browser/run with IMGGEN_TOKEN (same channel as 生图); MUSE_INJECT_URL optional override",
       });
     }
 
