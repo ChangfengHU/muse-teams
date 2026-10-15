@@ -47,7 +47,7 @@ function isMuseLoggedIn(b) {
 
 async function discoverLoggedInMuseTargets(env) {
   const fleetUrl = env.FLEET_API_URL || env.FLEET_LIST_URL;
-  if (!fleetUrl) return null;
+  if (!fleetUrl) return { browsers: null, error: "FLEET_API_URL unset" };
   try {
     const res = await fetch(fleetUrl, {
       headers: {
@@ -56,7 +56,7 @@ async function discoverLoggedInMuseTargets(env) {
         ...(env.FLEET_API_TOKEN ? { authorization: `Bearer ${env.FLEET_API_TOKEN}` } : {}),
       },
     });
-    if (!res.ok) return null;
+    if (!res.ok) return { browsers: null, error: `fleet HTTP ${res.status}` };
     const data = await res.json().catch(() => null);
     const browsers = [];
     const pushBrowser = (b, node) => {
@@ -106,16 +106,18 @@ async function discoverLoggedInMuseTargets(env) {
       const withMuse = muse.browsers || muse.lanes || [];
       for (const b of withMuse) pushBrowser({ ...b, muse: true, museStatus: "logged_in" }, null);
     }
-    return browsers;
-  } catch (_) {
-    return null;
+    return { browsers, error: null };
+  } catch (e) {
+    return { browsers: null, error: e.message || String(e) };
   }
 }
 
 async function loadTargets(env) {
   const discovered = await discoverLoggedInMuseTargets(env);
-  if (discovered && discovered.length) {
-    return { targets: discovered, source: "fleet_logged_in_muse" };
+  const fleetErr = discovered && discovered.error;
+  const browsers = discovered && discovered.browsers;
+  if (browsers && browsers.length) {
+    return { targets: browsers, source: "fleet_logged_in_muse" };
   }
   const configured = loadConfiguredTargets(env);
   if (configured && configured.length) {
@@ -126,6 +128,7 @@ async function loadTargets(env) {
         deliverable: t.deliverable !== false && t.status !== "offline",
       })),
       source: "INVITE_TARGETS_JSON",
+      fleet_error: fleetErr || undefined,
     };
   }
   return {
@@ -139,6 +142,7 @@ async function loadTargets(env) {
       },
     ],
     source: "stub",
+    fleet_error: fleetErr || (env.FLEET_API_URL || env.FLEET_LIST_URL ? "fleet returned zero Muse lanes" : "FLEET_API_URL unset"),
   };
 }
 
@@ -378,15 +382,16 @@ async function callTool(env, name, args = {}) {
 
   switch (name) {
     case "invite_list_targets": {
-      const { targets, source } = await loadTargets(env);
+      const { targets, source, fleet_error } = await loadTargets(env);
       const deliverable = targets.filter((t) => t.deliverable !== false && t.status !== "stub" && t.status !== "offline");
       return {
         targets,
         deliverable_count: deliverable.length,
         source,
+        fleet_error: fleet_error || undefined,
         note:
           source === "stub"
-            ? "stub — set FLEET_API_URL (logged-in Muse lanes) or INVITE_TARGETS_JSON"
+            ? "stub — set FLEET_API_URL (logged-in Muse lanes) or INVITE_TARGETS_JSON; same-zone fetch needs global_fetch_strictly_public"
             : "Only logged-in / deliverable targets should receive archive/suspend prompts",
       };
     }
