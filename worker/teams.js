@@ -277,6 +277,7 @@ const TASK_TRACE_TOOL = {
 
 async function ensureD1Schema(db) {
   if (!db) return;
+  if (globalThis.__museTeamsD1Ready) return;
   // D1 exec accepts multi-statement in batch via prepare/run per statement
   const stmts = D1_SCHEMA_SQL.split(";").map((s) => s.trim()).filter(Boolean);
   for (const sql of stmts) {
@@ -292,6 +293,7 @@ async function ensureD1Schema(db) {
   ]) {
     try { await db.prepare(sql).run(); } catch (_) { /* column may already exist */ }
   }
+  globalThis.__museTeamsD1Ready = true;
 }
 
 async function syncStateToD1(db, s) {
@@ -301,6 +303,15 @@ async function syncStateToD1(db, s) {
   const agents = Object.values(s.agents || {});
   const tasks = Object.values(s.tasks || {});
 
+  // Preserve lifecycle status from D1 when DO snapshot is stale (edge-first lifecycle)
+  let prevStatus = {};
+  try {
+    const { results: prevRows } = await db.prepare("SELECT code, status, suspended_at, archived_at FROM companies").all();
+    for (const r of prevRows || []) {
+      prevStatus[r.code] = { status: r.status, suspended_at: r.suspended_at, archived_at: r.archived_at };
+    }
+  } catch (_) { prevStatus = {}; }
+
   // Full replace for consistency with DO snapshot (small datasets)
   await db.batch([
     db.prepare("DELETE FROM tasks"),
@@ -308,8 +319,19 @@ async function syncStateToD1(db, s) {
     db.prepare("DELETE FROM companies"),
   ]);
 
+  const rank = { active: 0, suspended: 1, archived: 2 };
   const batch = [];
   for (const c of companies) {
+    const prev = prevStatus[c.code] || {};
+    let status = c.status || COMPANY_STATUS_ACTIVE;
+    let suspended_at = c.suspended_at || null;
+    let archived_at = c.archived_at || null;
+    // If D1 had a "later" lifecycle state, keep it until DO catches up
+    if (prev.status && (rank[prev.status] || 0) > (rank[status] || 0)) {
+      status = prev.status;
+      suspended_at = prev.suspended_at || suspended_at;
+      archived_at = prev.archived_at || archived_at;
+    }
     batch.push(
       db.prepare("INSERT INTO companies (code, name, created_at, intro, tags, status, suspended_at, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(
         c.code,
@@ -317,9 +339,9 @@ async function syncStateToD1(db, s) {
         c.created_at || 0,
         c.intro || c.blurb || "",
         JSON.stringify(Array.isArray(c.tags) ? c.tags : (c.specialties || [])),
-        c.status || COMPANY_STATUS_ACTIVE,
-        c.suspended_at || null,
-        c.archived_at || null
+        status,
+        suspended_at && suspended_at !== 0 ? suspended_at : 0,
+        archived_at && archived_at !== 0 ? archived_at : 0
       )
     );
   }
@@ -721,6 +743,17 @@ async function edgeRedeemInvite(db, stub, base, invite_id, agentFields) {
   return { agent, invite: { ...inv, status: 'redeemed', redeemed_at: now(), redeemed_by: agent.doorplate } };
 }
 
+
+
+async function dbBatchDeleteCompany(db, code) {
+  if (!db || !code) return;
+  await ensureD1Schema(db);
+  await db.batch([
+    db.prepare("DELETE FROM tasks WHERE company_code = ?").bind(code),
+    db.prepare("DELETE FROM agents WHERE company_code = ?").bind(code),
+    db.prepare("DELETE FROM invites WHERE company_code = ?").bind(code),
+  ]);
+}
 
 async function edgeSetCompanyStatus(db, code, { status, suspended_at, archived_at, name }) {
   if (!db || !code) return null;
@@ -2757,7 +2790,7 @@ return json({ ok: false, error: "not found"}, 404);
 }
 
 export default {
-async fetch(request, env) {
+async fetch(request, env, ctx) {
 // CORS preflight: answer at the edge, don't hit the DO
 if (request.method.toUpperCase() === "OPTIONS")
 return new Response(null, { status: 204, headers: {...CORS_HEADERS}});
@@ -2952,21 +2985,32 @@ if (body && body.method === "tools/call" && body.params && EDGE_NEW_TOOLS.some((
       const code = String(args.company_code || "").trim().toUpperCase();
       if (!code) throw new HttpError(400, "company_code required");
       const action = name === "teams_company_suspend" ? "suspend" : name === "teams_company_resume" ? "resume" : "archive";
-      const lres = await stub.fetch(new Request(`${base}/api/companies/${encodeURIComponent(code)}/${action}`, {
-        method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ from: args.from || null }),
-      }));
-      out = await lres.json().catch(() => ({}));
-      if (!lres.ok) throw new HttpError(lres.status, (out && out.error) || `${action} failed`);
-      try {
-        const co = out.company || {};
-        await edgeSetCompanyStatus(env.DB, code, {
-          status: out.status || co.status,
-          suspended_at: co.suspended_at,
-          archived_at: co.archived_at,
-          name: co.name,
-        });
-      } catch (se) { console.error("edge status sync", se && se.message); }
+      await ensureD1Schema(env.DB);
+      const co = await d1First(env.DB, "SELECT code, name, created_at, intro, tags, status, suspended_at, archived_at FROM companies WHERE code = ?", code);
+      if (!co) throw new HttpError(404, `公司码不存在: ${code}`);
+      const cur = co.status || COMPANY_STATUS_ACTIVE;
+      let tags = [];
+      try { tags = co.tags ? JSON.parse(co.tags) : []; } catch (_) { tags = []; }
+      const companyObj = { code: co.code, name: co.name, status: cur, suspended_at: co.suspended_at || null, archived_at: co.archived_at || null, created_at: co.created_at, intro: co.intro || "", tags };
+      if (action === "suspend") {
+        if (cur === COMPANY_STATUS_ARCHIVED) throw new HttpError(409, "公司已注销，不可休眠");
+        const suspended_at = cur === COMPANY_STATUS_SUSPENDED ? (co.suspended_at || now()) : now();
+        await d1Run(env.DB, "UPDATE companies SET status = ?, suspended_at = ? WHERE code = ?", COMPANY_STATUS_SUSPENDED, suspended_at, code);
+        companyObj.status = COMPANY_STATUS_SUSPENDED; companyObj.suspended_at = suspended_at;
+        out = { ok: true, company: companyObj, status: COMPANY_STATUS_SUSPENDED, label: "公司休眠", muse_action: { stop_heartbeat: true, wind_down: true, delete_data: false, pending_wake_timer: true, timer_name: "待唤醒", resume_path: `/api/companies/${code}/resume`, product_copy: "公司休眠 / 公司重开" }, prompt: buildSuspendPrompt(base, companyObj), channel: "detect_via_renew_or_get", edge: true };
+      } else if (action === "resume") {
+        if (cur === COMPANY_STATUS_ARCHIVED) throw new HttpError(409, "公司已注销，不可重开（终端态）");
+        await d1Run(env.DB, "UPDATE companies SET status = ?, suspended_at = ? WHERE code = ?", COMPANY_STATUS_ACTIVE, 0, code);
+        companyObj.status = COMPANY_STATUS_ACTIVE; companyObj.suspended_at = null; companyObj.resumed_at = now();
+        out = { ok: true, company: companyObj, status: COMPANY_STATUS_ACTIVE, label: "公司重开", muse_action: { restart_heartbeat: true, cancel_pending_wake: true, product_copy: "公司重开" }, prompt: buildResumePrompt(base, companyObj), channel: "detect_via_renew_or_get", edge: true };
+      } else {
+        if (cur === COMPANY_STATUS_ARCHIVED) throw new HttpError(409, "公司已注销");
+        const archived_at = now();
+        try { await dbBatchDeleteCompany(env.DB, code); } catch (_) {}
+        await d1Run(env.DB, "UPDATE companies SET status = ?, archived_at = ?, intro = ?, tags = ? WHERE code = ?", COMPANY_STATUS_ARCHIVED, archived_at, "", "[]", code);
+        companyObj.status = COMPANY_STATUS_ARCHIVED; companyObj.archived_at = archived_at; companyObj.intro = ""; companyObj.tags = [];
+        out = { ok: true, company: companyObj, status: COMPANY_STATUS_ARCHIVED, label: "公司注销", terminal: true, reopen: false, muse_action: { full_wipe: true, stop_heartbeat: true, delete_timers: true, delete_local_traces: true, reopen: false, product_copy: "公司注销" }, prompt: buildArchiveWipePrompt(base, companyObj), channel: "prompt", edge: true };
+      }
     } else {
       throw new HttpError(404, `unknown tool: ${name}`);
     }
@@ -3014,32 +3058,168 @@ try {
     }
   }
 
-  // Company lifecycle: suspend / resume / archive (proxy DO + sync D1 status)
+
+  // GET /api/companies/:code — prefer D1 (lifecycle status); DO GET with short timeout
+  {
+    const m = url.pathname.match(/^\/api\/companies\/([^/]+)$/);
+    if (method === "GET" && m) {
+      const code = decodeURIComponent(m[1]).toUpperCase();
+      let data = null;
+      try {
+        const row = await d1First(env.DB, "SELECT code, name, created_at, intro, tags, status, suspended_at, archived_at FROM companies WHERE code = ?", code);
+        if (row) {
+          let tags = [];
+          try { tags = row.tags ? JSON.parse(row.tags) : []; } catch (_) { tags = []; }
+          data = {
+            code: row.code,
+            name: row.name,
+            created_at: row.created_at,
+            intro: row.intro || "",
+            blurb: row.intro || "",
+            tags,
+            specialties: tags,
+            status: row.status || COMPANY_STATUS_ACTIVE,
+            suspended_at: row.suspended_at || null,
+            archived_at: row.archived_at || null,
+          };
+        }
+      } catch (_) {}
+      if (!data) {
+        try {
+          const cres = await withTimeout(stub.fetch(new Request(`${base}/api/companies/${encodeURIComponent(code)}`, { method: "GET" })), 2000);
+          data = await cres.json().catch(() => ({}));
+          if (!cres.ok) return json(data, cres.status);
+          if (!data.status) data.status = COMPANY_STATUS_ACTIVE;
+        } catch (_) {
+          return json({ ok: false, error: `公司码不存在: ${code}` }, 404);
+        }
+      }
+      return json(data);
+    }
+  }
+
+  // Edge renew: if D1 company is suspended/archived, return muse_action without DO
+  {
+    const m = url.pathname.match(/^\/api\/companies\/([^/]+)\/renew$/);
+    if (method === "POST" && m) {
+      const code = decodeURIComponent(m[1]).toUpperCase();
+      try {
+        const row = await d1First(env.DB, "SELECT code, name, status FROM companies WHERE code = ?", code);
+        const st = row && (row.status || COMPANY_STATUS_ACTIVE);
+        if (st === COMPANY_STATUS_ARCHIVED) {
+          return json({ ok: false, error: "公司已注销（archived），不可续约", company_status: COMPANY_STATUS_ARCHIVED, muse_action: { full_wipe: true, stop_heartbeat: true, reopen: false } }, 410);
+        }
+        if (st === COMPANY_STATUS_SUSPENDED) {
+          return json({
+            ok: false,
+            company_code: code,
+            company_status: COMPANY_STATUS_SUSPENDED,
+            renewed: [],
+            count: 0,
+            label: "公司休眠",
+            muse_action: {
+              stop_heartbeat: true, wind_down: true, delete_data: false,
+              pending_wake_timer: true, timer_name: "待唤醒",
+              resume_path: `/api/companies/${code}/resume`,
+              product_copy: "公司休眠 / 公司重开",
+            },
+            message: "公司已休眠：停止心跳并设置「待唤醒」定时器；勿删除数据。",
+            edge: true,
+          });
+        }
+      } catch (_) {}
+      // else fall through to DO renew below
+    }
+  }
+
+  // Company lifecycle: edge-first D1 only (never touch sticky/hung DO)
   {
     const m = url.pathname.match(/^\/api\/companies\/([^/]+)\/(suspend|resume|archive)$/);
     if (method === "POST" && m) {
-      let body = null;
-      try { body = await request.json(); } catch (_) { body = {}; }
-      const code = decodeURIComponent(m[1]).toUpperCase();
-      const action = m[2];
-      const lres = await stub.fetch(new Request(`${base}/api/companies/${encodeURIComponent(code)}/${action}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body || {}),
-      }));
-      const out = await lres.json().catch(() => ({}));
-      if (lres.ok) {
-        try {
-          const co = out.company || {};
-          await edgeSetCompanyStatus(env.DB, code, {
-            status: out.status || co.status,
-            suspended_at: co.suspended_at,
-            archived_at: co.archived_at,
-            name: co.name,
-          });
-        } catch (se) { console.error("edge lifecycle d1", se && se.message); }
+      try {
+        let body = null;
+        try { body = await request.json(); } catch (_) { body = {}; }
+        const code = decodeURIComponent(m[1]).toUpperCase();
+        const action = m[2];
+        await ensureD1Schema(env.DB);
+        let co = await d1First(env.DB, "SELECT code, name, created_at, intro, tags, status, suspended_at, archived_at FROM companies WHERE code = ?", code);
+        if (!co) {
+          return json({ ok: false, error: `公司码不存在: ${code}` }, 404);
+        }
+        const cur = co.status || COMPANY_STATUS_ACTIVE;
+        let tags = [];
+        try { tags = co.tags ? JSON.parse(co.tags) : []; } catch (_) { tags = []; }
+        const companyObj = {
+          code: co.code, name: co.name, status: cur,
+          suspended_at: co.suspended_at || null, archived_at: co.archived_at || null,
+          created_at: co.created_at, intro: co.intro || "", tags,
+        };
+        let out;
+        if (action === "suspend") {
+          if (cur === COMPANY_STATUS_ARCHIVED) {
+            return json({ ok: false, error: "公司已注销，不可休眠", company_status: COMPANY_STATUS_ARCHIVED }, 409);
+          }
+          const suspended_at = cur === COMPANY_STATUS_SUSPENDED ? (co.suspended_at || now()) : now();
+          await d1Run(env.DB, "UPDATE companies SET status = ?, suspended_at = ? WHERE code = ?", COMPANY_STATUS_SUSPENDED, suspended_at, code);
+          companyObj.status = COMPANY_STATUS_SUSPENDED;
+          companyObj.suspended_at = suspended_at;
+          out = {
+            ok: true, already: cur === COMPANY_STATUS_SUSPENDED, company: companyObj,
+            status: COMPANY_STATUS_SUSPENDED, label: "公司休眠",
+            muse_action: {
+              stop_heartbeat: true, wind_down: true, delete_data: false,
+              pending_wake_timer: true, timer_name: "待唤醒",
+              resume_path: `/api/companies/${code}/resume`,
+              product_copy: "公司休眠 / 公司重开",
+            },
+            prompt: buildSuspendPrompt(base, companyObj),
+            channel: "detect_via_renew_or_get", edge: true,
+          };
+        } else if (action === "resume") {
+          if (cur === COMPANY_STATUS_ARCHIVED) {
+            return json({ ok: false, error: "公司已注销，不可重开（终端态）", company_status: COMPANY_STATUS_ARCHIVED, reopen: false }, 409);
+          }
+          await d1Run(env.DB, "UPDATE companies SET status = ?, suspended_at = ? WHERE code = ?", COMPANY_STATUS_ACTIVE, 0, code);
+          companyObj.status = COMPANY_STATUS_ACTIVE;
+          companyObj.resumed_at = now();
+          companyObj.suspended_at = null; // D1 stores 0
+          out = {
+            ok: true, already: cur === COMPANY_STATUS_ACTIVE, company: companyObj,
+            status: COMPANY_STATUS_ACTIVE, label: "公司重开",
+            muse_action: { restart_heartbeat: true, cancel_pending_wake: true, product_copy: "公司重开" },
+            prompt: buildResumePrompt(base, companyObj),
+            channel: "detect_via_renew_or_get", edge: true,
+          };
+        } else {
+          // archive
+          if (cur === COMPANY_STATUS_ARCHIVED) {
+            return json({ ok: false, error: "公司已注销", company_status: COMPANY_STATUS_ARCHIVED, reopen: false }, 409);
+          }
+          const archived_at = now();
+          try { await dbBatchDeleteCompany(env.DB, code); } catch (we) { console.error("edge archive wipe", we && we.message); }
+          await d1Run(env.DB, "UPDATE companies SET status = ?, archived_at = ?, intro = ?, tags = ? WHERE code = ?", COMPANY_STATUS_ARCHIVED, archived_at, "", "[]", code);
+          companyObj.status = COMPANY_STATUS_ARCHIVED;
+          companyObj.archived_at = archived_at;
+          companyObj.intro = "";
+          companyObj.tags = [];
+          out = {
+            ok: true, company: companyObj, status: COMPANY_STATUS_ARCHIVED,
+            label: "公司注销", terminal: true, reopen: false,
+            wiped: { note: "edge D1 wipe (agents/tasks/invites)" },
+            muse_action: {
+              full_wipe: true, stop_heartbeat: true, delete_timers: true,
+              delete_local_traces: true, reopen: false, product_copy: "公司注销",
+            },
+            prompt: buildArchiveWipePrompt(base, companyObj),
+            channel: "prompt", edge: true,
+            note: "必须经 invite-mcp 向当前已登录 Muse lane 投递 prompt。",
+          };
+        }
+        // DO sync deferred: syncStateToD1 preserves higher-rank D1 lifecycle status.
+        return json(out);
+      } catch (le) {
+        return json({ ok: false, error: (le && le.message) || String(le), edge: true }, 500);
       }
-      return json(out, lres.status);
     }
   }
 

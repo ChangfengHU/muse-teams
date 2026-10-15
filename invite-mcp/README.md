@@ -29,7 +29,7 @@
 
 ## 配置
 
-- `TEAMS_API_URL` 默认 `https://teams.vyibc.com`
+- `TEAMS_API_URL` 生产建议 `https://muse-teams-v1.<account>.workers.dev`（invite→teams 同区自定义域易 522）；对外文档仍写 teams.vyibc.com
 - `TEAMS_MCP_URL` 默认 `https://teams.vyibc.com/mcp`
 - `FLEET_API_URL` 可选：返回已登录 Muse browsers 的 JSON
 - `INVITE_TARGETS_JSON` 可选：手动 targets
