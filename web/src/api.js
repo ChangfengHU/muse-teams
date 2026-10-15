@@ -224,14 +224,28 @@ export function heartbeatLabel(ts) {
 
 
 export function durStr(ms) {
-if (ms == null || ms < 0) return '';
-const s = Math.floor(ms / 1000);
-if (s < 60) return s + ' 秒';
-const m = Math.floor(s / 60);
-if (m < 60) return m + ' 分钟';
-const h = Math.floor(m / 60);
-if (h < 48) return h + ' 小时';
-return Math.floor(h / 24) + ' 天';
+  if (ms == null || ms < 0) return '';
+  if (ms < 1000) return ms + ' 毫秒';
+  const s = ms / 1000;
+  if (s < 60) {
+    const rounded = Math.abs(s - Math.round(s)) < 0.05 ? Math.round(s) : Number(s.toFixed(1));
+    return rounded + ' 秒';
+  }
+  const m = s / 60;
+  if (m < 60) {
+    const rounded = m < 10 && Math.abs(m - Math.round(m)) >= 0.05
+      ? Number(m.toFixed(1))
+      : Math.round(m);
+    return rounded + ' 分钟';
+  }
+  const h = m / 60;
+  if (h < 48) {
+    const rounded = h < 10 && Math.abs(h - Math.round(h)) >= 0.05
+      ? Number(h.toFixed(1))
+      : Math.round(h);
+    return rounded + ' 小时';
+  }
+  return Math.floor(h / 24) + ' 天';
 }
 
 export function esc(s) {

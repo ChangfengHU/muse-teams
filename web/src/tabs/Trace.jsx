@@ -11,6 +11,22 @@ const STAGE_META = {
   reviewed: { icon: '✅', hint: '验收结案' },
 };
 
+/** Map durations_ms keys → stage-pair labels (Chinese). */
+const DUR_ROWS = [
+  { k: 'pending_to_claim', label: '发单 → 抢单', from: 'created', to: 'claimed' },
+  { k: 'claim_to_submit', label: '抢单 → 交单', from: 'claimed', to: 'submitted' },
+  { k: 'submit_to_done', label: '交单 → 验收', from: 'submitted', to: 'reviewed' },
+  { k: 'total', label: '合计', from: null, to: null },
+];
+
+/** Which durations_ms key sits between stage A → stage B (rail chip). */
+const EDGE_DUR_KEY = {
+  'created->claimed': 'pending_to_claim',
+  'plaza->claimed': 'pending_to_claim',
+  'claimed->submitted': 'claim_to_submit',
+  'submitted->reviewed': 'submit_to_done',
+};
+
 function parseTraceIdFromHash() {
   if (typeof location === 'undefined') return '';
   const raw = (location.hash || '').replace(/^#/, '');
@@ -47,51 +63,76 @@ function ActorChip({ actor }) {
   );
 }
 
-function StageNode({ stage, isLast }) {
-  const meta = STAGE_META[stage.stage] || { icon: '•', hint: '' };
-  const done = stage.at != null;
-  const rejected = stage.stage === 'reviewed' && stage.payload && stage.payload.approved === false;
+/** Small chip under a stage: time until the next meaningful stage. */
+function StageDelta({ prev, next, durations }) {
+  if (!prev || !next) return null;
+  const key = EDGE_DUR_KEY[`${prev.stage}->${next.stage}`];
+  let ms = key && durations ? durations[key] : null;
+  // Fallback: compute from timestamps when API key missing
+  if (ms == null && prev.at != null && next.at != null) {
+    ms = Math.max(0, next.at - prev.at);
+  }
+  // Skip near-zero hops (e.g. 发单→进广场 often same ms)
+  if (ms != null && ms < 50 && prev.at != null && next.at != null) return null;
+
+  const toLabel = next.label || next.stage;
+  let text;
+  if (next.at == null) {
+    text = '进行中';
+  } else if (ms == null) {
+    return null;
+  } else {
+    text = durStr(ms) || '—';
+  }
   return (
-    <div className={`trace-node${done ? ' done' : ' pending'}${rejected ? ' rejected' : ''}`}>
-      <div className="trace-node-rail">
-        <div className="trace-dot" aria-hidden>{meta.icon}</div>
-        {!isLast && <div className="trace-rail" />}
-      </div>
-      <div className="trace-node-body">
-        <div className="trace-node-title">
-          <b>{stage.label || stage.stage}</b>
-          <span className="trace-hint">{meta.hint}</span>
-          {done ? (
-            <time className="trace-at">{fmtTime(stage.at)}</time>
-          ) : (
-            <span className="trace-at muted">未到达</span>
-          )}
-        </div>
-        <div className="trace-node-meta">
-          <ActorChip actor={stage.actor} />
-          {stage.payload && Object.keys(stage.payload).length > 0 && (
-            <pre className="trace-payload">{JSON.stringify(stage.payload, null, 0)}</pre>
-          )}
-        </div>
-      </div>
+    <div
+      className={`trace-delta${next.at == null ? ' live' : ''}`}
+      title={`${prev.label || prev.stage} → ${toLabel}`}
+    >
+      <span className="trace-delta-arrow" aria-hidden>↓</span>
+      <span className="trace-delta-to">到{toLabel}</span>
+      <span className="trace-delta-val">{text}</span>
     </div>
   );
 }
 
-function Durations({ d }) {
-  if (!d) return null;
-  const rows = [
-    { k: 'pending_to_claim', label: '发单 → 抢单' },
-    { k: 'claim_to_submit', label: '抢单 → 交单' },
-    { k: 'submit_to_done', label: '交单 → 验收' },
-    { k: 'total', label: '全程' },
-  ];
+function Durations({ d, stages }) {
+  if (!d && !(stages && stages.length)) return null;
+
+  const rows = DUR_ROWS.map((r) => {
+    let ms = d ? d[r.k] : null;
+    let pending = false;
+    if (ms == null && stages && r.from && r.to) {
+      const a = stages.find((s) => s.stage === r.from);
+      const b = stages.find((s) => s.stage === r.to);
+      if (a && b && a.at != null && b.at != null) ms = Math.max(0, b.at - a.at);
+      else if (a && a.at != null && (!b || b.at == null)) pending = true;
+    }
+    if (r.k === 'total' && ms == null && stages) {
+      const first = stages.find((s) => s.at != null);
+      const lastDone = [...stages].reverse().find((s) => s.at != null);
+      if (first && lastDone && lastDone !== first) ms = Math.max(0, lastDone.at - first.at);
+      const allDone = stages.every((s) => s.at != null);
+      if (!allDone && first) pending = true;
+    }
+    return { ...r, ms, pending };
+  });
+
+  const hasAny = rows.some((r) => r.ms != null || r.pending);
+  if (!hasAny) return null;
+
   return (
-    <div className="trace-durs">
+    <div className="trace-durs" role="group" aria-label="阶段耗时">
       {rows.map((r) => (
-        <div key={r.k} className="trace-dur-chip">
+        <div key={r.k} className={`trace-dur-chip${r.k === 'total' ? ' total' : ''}${r.pending ? ' live' : ''}`}>
           <span>{r.label}</span>
-          <b>{d[r.k] != null ? durStr(d[r.k]) : '—'}</b>
+          <b>
+            {r.pending && r.ms == null
+              ? '进行中'
+              : r.ms != null
+                ? durStr(r.ms) || '—'
+                : '—'}
+          </b>
         </div>
       ))}
     </div>
@@ -149,6 +190,8 @@ export default function Trace({ company, onToast, initialTaskId }) {
     const meta = ST_META[stKey({ status: data.status })] || {};
     return meta.label || data.status;
   }, [data]);
+
+  const stages = data?.stages || [];
 
   return (
     <div className="mt-tabpane trace-pane">
@@ -210,13 +253,43 @@ export default function Trace({ company, onToast, initialTaskId }) {
                 )}
               </div>
             </div>
-            <Durations d={data.durations_ms} />
           </div>
 
+          <Durations d={data.durations_ms} stages={stages} />
+
           <div className="trace-chain">
-            {(data.stages || []).map((s, i, arr) => (
-              <StageNode key={s.stage} stage={s} isLast={i === arr.length - 1} />
-            ))}
+            {stages.map((s, i, arr) => {
+              const next = arr[i + 1];
+              const done = s.at != null;
+              const rejected = s.stage === 'reviewed' && s.payload && s.payload.approved === false;
+              const meta = STAGE_META[s.stage] || { icon: '•', hint: '' };
+              return (
+                <div key={s.stage} className={`trace-node${done ? ' done' : ' pending'}${rejected ? ' rejected' : ''}`}>
+                  <div className="trace-node-rail">
+                    <div className="trace-dot" aria-hidden>{meta.icon}</div>
+                    {next && <div className="trace-rail" />}
+                  </div>
+                  <div className="trace-node-body">
+                    <div className="trace-node-title">
+                      <b>{s.label || s.stage}</b>
+                      <span className="trace-hint">{meta.hint}</span>
+                      {done ? (
+                        <time className="trace-at">{fmtTime(s.at)}</time>
+                      ) : (
+                        <span className="trace-at muted">进行中</span>
+                      )}
+                    </div>
+                    <div className="trace-node-meta">
+                      <ActorChip actor={s.actor} />
+                      {s.payload && Object.keys(s.payload).length > 0 && (
+                        <pre className="trace-payload">{JSON.stringify(s.payload, null, 0)}</pre>
+                      )}
+                    </div>
+                    {next && <StageDelta prev={s} next={next} durations={data.durations_ms} />}
+                  </div>
+                </div>
+              );
+            })}
           </div>
 
           {Array.isArray(data.prompts) && data.prompts.length > 0 && (
