@@ -86,12 +86,6 @@ createCompany: (name) =>
     : {}),
 getCompanyInfo: (code) =>
   request(`/api/companies/${encodeURIComponent(code.trim().toUpperCase())}`),
-/** 公司级续约：scheduler 带全部门牌号一次刷新心跳 */
-companyRenew: (code, doorplates, from) =>
-  request(`/api/companies/${encodeURIComponent(String(code).trim().toUpperCase())}/renew`, 'POST', {
-    doorplates: doorplates || [],
-    ...(from ? { from } : {}),
-  }),
 /** 公司级续约：调度器用 workers-<code>.json 全部门牌号一次刷新心跳 */
 companyRenew: (code, doorplates, from) =>
   request(`/api/companies/${encodeURIComponent(String(code).trim().toUpperCase())}/renew`, 'POST', {
@@ -101,6 +95,12 @@ companyRenew: (code, doorplates, from) =>
 
 // 只读（全部按公司过滤）
 agents: () => request(`/api/agents?company=${encodeURIComponent(needCompany())}`),
+/** 按公司码拉员工，不读写当前选中公司 */
+agentsFor: (code) => {
+  const c = String(code || '').trim().toUpperCase();
+  if (!c) throw new Error('需要公司码');
+  return request(`/api/agents?company=${encodeURIComponent(c)}`);
+},
 tasks: (status) => request(`/api/tasks?status=${status}&company=${encodeURIComponent(needCompany())}`),
 feed: () => request(`/api/feed?company=${encodeURIComponent(needCompany())}`),
 invite: (role) => {
@@ -120,8 +120,12 @@ reviewTask: (taskId, approved, note) =>
   request(`/api/tasks/${encodeURIComponent(taskId)}/review`, 'POST', { approved, note, company_code: needCompany() }),
 deleteTask: (taskId, from) =>
   request(`/api/tasks/${encodeURIComponent(taskId)}?company=${encodeURIComponent(needCompany())}&from=${encodeURIComponent(from)}`, 'DELETE'),
-deleteAgent: (doorplate, from) =>
-  request(`/api/agents/${encodeURIComponent(doorplate)}?company=${encodeURIComponent(needCompany())}&from=${encodeURIComponent(from)}`, 'DELETE'),
+deleteAgent: (doorplate, from, companyCode) => {
+  const c = (companyCode && String(companyCode).trim())
+    ? String(companyCode).trim().toUpperCase()
+    : needCompany();
+  return request(`/api/agents/${encodeURIComponent(doorplate)}?company=${encodeURIComponent(c)}&from=${encodeURIComponent(from)}`, 'DELETE');
+},
 sendMail: ({ from, to, text, task_id }) =>
   request('/api/mail/send', 'POST', { from, to, text, task_id, company_code: needCompany() }),
 broadcast: (from, text) =>

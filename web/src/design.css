@@ -312,3 +312,140 @@ body {
 .staff-table .st-light { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: #3cb371; }
 .staff-table .st-light.busy { background: #d97757; }
 .staff-table .st-light.offline { background: #a0a0a0; }
+
+
+/* ---------- 员工管理：公司区域框 ---------- */
+.staff-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.staff-toolbar-hint {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.company-zones {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+.company-zone {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow: 0 2px 10px rgba(0,0,0,.04);
+}
+.company-zone.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(217,119,87,.22), 0 4px 14px rgba(217,119,87,.08);
+}
+.company-zone-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px;
+  background: rgba(255,255,255,.55);
+  border-bottom: 1px solid var(--line);
+}
+.company-zone-name {
+  font-weight: 700;
+  font-size: 15px;
+  color: var(--ink);
+}
+.company-zone-sub {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 3px;
+}
+.company-zone-sub code {
+  font-family: ui-monospace, monospace;
+  color: var(--accent-dark);
+  font-weight: 650;
+}
+.company-zone-body {
+  padding: 10px 12px 12px;
+  min-height: 64px;
+}
+.emp-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.emp-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: rgba(255,255,255,.72);
+  transition: background .12s, border-color .12s;
+}
+.emp-card:hover {
+  border-color: rgba(217,119,87,.35);
+  background: #fff;
+}
+.emp-card.offline {
+  opacity: 0.78;
+}
+.emp-meta {
+  flex: 1;
+  min-width: 0;
+}
+.emp-name {
+  font-weight: 650;
+  font-size: 13.5px;
+  line-height: 1.3;
+}
+.emp-door {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-family: ui-monospace, monospace;
+  margin-top: 1px;
+}
+.emp-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  font-size: 12px;
+  margin-top: 4px;
+  color: var(--ink);
+}
+.emp-hb {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.emp-task {
+  font-size: 11.5px;
+  color: var(--muted);
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.emp-del {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.emp-card .st-light,
+.company-zone .st-light {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #3cb371;
+}
+.emp-card .st-light.busy,
+.company-zone .st-light.busy { background: #d97757; }
+.emp-card .st-light.offline,
+.company-zone .st-light.offline { background: #a0a0a0; }
+
+@media (max-width: 720px) {
+  .company-zones { grid-template-columns: 1fr; }
+}

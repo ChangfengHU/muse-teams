@@ -1,4 +1,4 @@
-// Muse Teams —— 主应用（v3：进站直达工作台 + 公司管理）
+// Muse Teams —— 主应用（v3：进站直达工作台 + 公司管理 + hash 路由）
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { api, getCompany, setCompany } from './api.js';
 import Sidebar from './components/Sidebar.jsx';
@@ -15,8 +15,39 @@ import { deliverCelebration } from './anim.js';
 import './animations.css';
 import './design.css';
 
+const TAB_TO_HASH = {
+  companies: 'companies',
+  home: 'home',
+  tasks: 'tasks',
+  agents: 'team',
+  arts: 'arts',
+  feed: 'feed',
+};
+const HASH_TO_TAB = Object.fromEntries(
+  Object.entries(TAB_TO_HASH).map(([tab, hash]) => [hash, tab])
+);
+
+function tabFromHash() {
+  const raw = (typeof location !== 'undefined' ? location.hash : '') || '';
+  const key = raw.replace(/^#/, '').split(/[?/]/)[0].trim().toLowerCase();
+  if (key && HASH_TO_TAB[key]) return HASH_TO_TAB[key];
+  return getCompany() ? 'home' : 'companies';
+}
+
+function setHashForTab(tab) {
+  const hash = TAB_TO_HASH[tab] || 'home';
+  const next = '#' + hash;
+  if (typeof location === 'undefined') return;
+  if (location.hash === next) return;
+  try {
+    history.replaceState(null, '', next);
+  } catch (_) {
+    location.hash = hash;
+  }
+}
+
 export default function App() {
-  const [tab, setTab] = useState(() => (getCompany() ? 'home' : 'companies'));
+  const [tab, setTab] = useState(() => tabFromHash());
   const [company, setCompanyInfo] = useState(null); // {code, name} | null
   const [agents, setAgents] = useState([]);
   const [tasks, setTasks] = useState([]);
@@ -32,6 +63,25 @@ export default function App() {
     setToastMsg({ msg, isErr: !!isErr });
     clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToastMsg(null), 2800);
+  }, []);
+
+  const switchTab = useCallback((next) => {
+    setTab(next);
+    setHashForTab(next);
+  }, []);
+
+  // hash ↔ tab
+  useEffect(() => {
+    setHashForTab(tab);
+  }, [tab]);
+
+  useEffect(() => {
+    const onHash = () => {
+      const next = tabFromHash();
+      setTab((cur) => (cur === next ? cur : next));
+    };
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
   const refresh = useCallback(async (silent) => {
@@ -71,7 +121,7 @@ export default function App() {
     setCompany('');
     setCompanyInfo(null);
     setAgents([]); setTasks([]); setFeed([]); setConnected(false);
-    setTab('companies');
+    switchTab('companies');
   };
 
   const onSelectCompany = (info) => {
@@ -132,7 +182,7 @@ export default function App() {
         ) : (
           <div className="reg-pill">
             🏢 尚未选择公司
-            <button onClick={() => setTab('companies')}>去创建</button>
+            <button onClick={() => switchTab('companies')}>去创建</button>
           </div>
         )}
         <div className="chips">
@@ -148,7 +198,7 @@ export default function App() {
       </header>
 
       <div className="app-layout">
-        <Sidebar tab={tab} onSwitch={setTab} />
+        <Sidebar tab={tab} onSwitch={switchTab} />
         <main className="main">
           {tab === 'companies' && (
             <Companies
@@ -159,9 +209,18 @@ export default function App() {
             />
           )}
 
-          {tab !== 'companies' && !company && needCompanyHint}
+          {/* 员工页自管全公司加载，不依赖当前公司 / connected */}
+          {tab === 'agents' && (
+            <Members
+              company={company}
+              onSelectCompany={onSelectCompany}
+              onToast={toast}
+            />
+          )}
 
-          {tab !== 'companies' && company && !connected && (
+          {tab !== 'companies' && tab !== 'agents' && !company && needCompanyHint}
+
+          {tab !== 'companies' && tab !== 'agents' && company && !connected && (
             <div className="empty-hint">连接中…</div>
           )}
 
@@ -180,7 +239,6 @@ export default function App() {
               onRefresh={() => refresh(true)} onOpenArtifact={openArtifact}
               onCelebrate={handleCelebrate} />
           )}
-          {connected && tab === 'agents' && <Members agents={agents} tasks={tasks} company={company} onRefresh={() => refresh(true)} />}
           {connected && tab === 'arts' && (
             <Artifacts tasks={tasks} agents={agents} onOpenArtifact={openArtifact} />
           )}
