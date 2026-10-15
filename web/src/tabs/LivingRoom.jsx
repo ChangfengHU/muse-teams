@@ -192,7 +192,7 @@ export default function LivingRoom({
               {coName}
               {coCode ? <code className="lr-den-code">{coCode}</code> : null}
             </h2>
-            <p className="lr-den-tagline">本窝毛怪在这儿歇脚干活 · 纸飞机谁抢到算谁的（可跨公司）</p>
+            <p className="lr-den-tagline">本窝毛怪在这儿歇着干活 · 纸飞机谁抢到算谁的（可跨公司）</p>
           </div>
         </div>
         <div className="lr-den-stats">
@@ -257,7 +257,7 @@ export default function LivingRoom({
             <span className="lr-panel-ico" aria-hidden>🛋️</span>
             <span className="lr-panel-title">等候区</span>
             <span className="lr-panel-count">{idle.length}</span>
-            <span className="lr-panel-hint">歇脚中</span>
+            <span className="lr-panel-hint">歇着</span>
           </header>
           <div className="lr-seat-grid lr-seat-grid-wait">
             {idle.map((a) => (

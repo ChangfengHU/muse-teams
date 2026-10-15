@@ -198,7 +198,7 @@ export default function App() {
           </div>
         )}
         <div className="chips">
-          <span className="chip">🛋️ 歇脚 <b>{online}</b></span>
+          <span className="chip">🛋️ 在线 <b>{online}</b></span>
           <span className="chip">✈️ 纸飞机 <b>{pendingN}</b></span>
           <span className={`chip${busy ? ' hot' : ''}`}>🏃 干活 <b>{busy}</b></span>
           <span className={`chip${reviewN ? ' hot' : ''}`}>📦 待收 <b>{reviewN}</b></span>
