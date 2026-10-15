@@ -52,7 +52,7 @@ async function discoverLoggedInMuseTargets(env) {
     const res = await fetch(fleetUrl, {
       headers: {
         accept: "application/json",
-        "user-agent": "muse-teams-invite/0.3",
+        "user-agent": "muse-teams-invite/0.3.1",
         ...(env.FLEET_API_TOKEN ? { authorization: `Bearer ${env.FLEET_API_TOKEN}` } : {}),
       },
     });
@@ -183,7 +183,7 @@ const TOOLS = [
           description: "suspend | resume | archive",
           enum: ["suspend", "resume", "archive"],
         },
-        from: { type: "string" },
+        from: { type: "string", description: "Required lead doorplate when apply=true (Teams lead auth)" },
         apply: {
           type: "boolean",
           description: "If true (default), call Teams suspend/resume/archive to change status; if false, only fetch company and build local prompt text from status.",
@@ -313,7 +313,7 @@ async function injectViaBrowserRun(env, target, prompt) {
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${token}`,
-        "user-agent": "muse-teams-invite/0.3",
+        "user-agent": "muse-teams-invite/0.3.1",
       },
       body: JSON.stringify({ instance, actions }),
     });
@@ -346,7 +346,7 @@ async function injectViaAdapterUrl(env, target, { prompt, kind, invite_id, compa
   try {
     const ir = await fetch(env.MUSE_INJECT_URL, {
       method: "POST",
-      headers: { "content-type": "application/json", "user-agent": "muse-teams-invite/0.3" },
+      headers: { "content-type": "application/json", "user-agent": "muse-teams-invite/0.3.1" },
       body: JSON.stringify({
         target_id,
         host: target.host,
@@ -420,6 +420,9 @@ async function callTool(env, name, args = {}) {
           note: "apply=false: status not changed; call with apply=true to suspend/resume/archive",
           company: co,
         };
+      }
+      if (!args.from || !String(args.from).trim()) {
+        throw new Error("from (lead doorplate) required when apply=true");
       }
       const out = await teamsLifecycle(TEAMS_API, args);
       const labels = { suspend: "公司休眠", resume: "公司重开", archive: "公司注销" };
@@ -543,7 +546,7 @@ async function handleRpc(env, msg) {
       return ok(id, {
         protocolVersion: "2024-11-05",
         capabilities: { tools: {} },
-        serverInfo: { name: "muse-teams-invite", version: "0.3.0" },
+        serverInfo: { name: "muse-teams-invite", version: "0.3.1" },
       });
     }
     if (msg.method === "notifications/initialized") return ok(id, {});
@@ -576,7 +579,7 @@ export default {
       return json({
         ok: true,
         service: "muse-teams-invite",
-        version: "0.3.0",
+        version: "0.3.1",
         mcp: "POST /invite-mcp (or POST /) streamable-http JSON-RPC",
         tools: TOOLS.map((t) => t.name),
         teams_api: env.TEAMS_API_URL || TEAMS_API_DEFAULT,

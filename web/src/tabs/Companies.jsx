@@ -232,10 +232,26 @@ export default function Companies({ company, agents, onSelectCompany, onToast })
     }
     setLifeBusy(true);
     try {
+      // Lifecycle requires lead `from`. Resolve lead from roster; empty shell prompts operator tag.
+      let from = null;
+      try {
+        const { agents } = await api.agentsFor(code);
+        const list = agents || [];
+        const lead = list.find((a) => a.role === 'lead') || list[0] || null;
+        from = lead ? lead.doorplate : null;
+      } catch (_) { /* ignore */ }
+      if (!from) {
+        from = window.prompt('请输入本公司 lead 门牌号（空公司可填操作者标记）');
+        if (!from || !String(from).trim()) {
+          toast('需要 from（lead 门牌号）才能操作', true);
+          return;
+        }
+        from = String(from).trim();
+      }
       const fn = action === 'suspend' ? api.companySuspend
         : action === 'resume' ? api.companyResume
         : api.companyArchive;
-      const out = await fn(code);
+      const out = await fn(code, from);
       setLifePrompt(out.prompt || '');
       toast(`${label}成功 · status=${out.status || (out.company && out.company.status)}`);
       await loadCompanies(true);

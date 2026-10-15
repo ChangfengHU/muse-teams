@@ -345,7 +345,34 @@ async function syncStateToD1(db, s) {
       )
     );
   }
+  // Keep archived tombstones that exist only in D1 (DO no longer has the company object)
+  const writtenCodes = new Set(companies.map((c) => c.code));
+  for (const [code, prev] of Object.entries(prevStatus)) {
+    if (prev.status === COMPANY_STATUS_ARCHIVED && !writtenCodes.has(code)) {
+      batch.push(
+        db.prepare("INSERT INTO companies (code, name, created_at, intro, tags, status, suspended_at, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(
+          code, code, 0, "", "[]", COMPANY_STATUS_ARCHIVED, prev.suspended_at || 0, prev.archived_at || now()
+        )
+      );
+    }
+  }
+  // Tombstone: never reinsert agents/tasks for archived companies (anti-resurrect)
+  const archivedCodes = new Set();
+  for (const c of companies) {
+    const prev = prevStatus[c.code] || {};
+    const merged = ((rank[prev.status] || 0) > (rank[c.status || COMPANY_STATUS_ACTIVE] || 0))
+      ? prev.status
+      : (c.status || COMPANY_STATUS_ACTIVE);
+    if (merged === COMPANY_STATUS_ARCHIVED || prev.status === COMPANY_STATUS_ARCHIVED) {
+      archivedCodes.add(c.code);
+    }
+  }
+  for (const [code, prev] of Object.entries(prevStatus)) {
+    if (prev.status === COMPANY_STATUS_ARCHIVED) archivedCodes.add(code);
+  }
+
   for (const a of agents) {
+    if (a.company && archivedCodes.has(a.company)) continue;
     batch.push(
       db.prepare(
         `INSERT INTO agents (doorplate, company_code, name, avatar, tags, role, model, last_heartbeat, current_task)
@@ -364,6 +391,7 @@ async function syncStateToD1(db, s) {
     );
   }
   for (const t of tasks) {
+    if (t.company && archivedCodes.has(t.company)) continue;
     const payload = JSON.stringify({
       desc: t.desc || "",
       priority: t.priority || "P1",
@@ -646,7 +674,8 @@ async function edgeListReceipts(db, { doorplate, company, type, unread_only, mar
 async function edgeCreateInvite(db, body, base) {
   const company_code = String(body.company_code || '').trim().toUpperCase();
   if (!company_code) throw new HttpError(400, 'company_code required');
-  const co = await d1First(db, 'SELECT code, name FROM companies WHERE code = ?', company_code);
+  const coRow = await edgeAssertCompanyActive(db, company_code, '创建邀请');
+  const co = coRow;
   const company_name = (co && co.name) || company_code;
   const invite_id = 'INV-' + Date.now().toString(36).toUpperCase() + '-' + Array.from({ length: 4 }, () => COMPANY_ALPHABET[Math.floor(Math.random() * COMPANY_ALPHABET.length)]).join('');
   const specs = normalizeCompanyTags(body.specialties != null ? body.specialties : body.tags);
@@ -710,6 +739,7 @@ async function edgeGetInvite(db, invite_id) {
 async function edgeRedeemInvite(db, stub, base, invite_id, agentFields) {
   const inv = await edgeGetInvite(db, invite_id);
   if (inv.status !== 'pending') throw new HttpError(409, `invite ${invite_id} already ${inv.status}`);
+  await edgeAssertCompanyActive(db, inv.company_code, "兑付邀请入职");
   const tags = [...(inv.specialties || []), ...((agentFields && agentFields.tags) || [])];
   const regBody = {
     name: agentFields && agentFields.name,
@@ -859,38 +889,38 @@ const EDGE_NEW_TOOLS = [
   },
   {
     name: 'teams_company_suspend',
-    description: '公司休眠（suspend）：active→suspended，可重开。Muse 停心跳+待唤醒，不删数据。Keywords: suspend, 休眠, 公司休眠.',
+    description: '公司休眠（suspend）：active→suspended，可重开。须 from=本公司 lead。Muse 停心跳+待唤醒，不删数据。Keywords: suspend, 休眠, 公司休眠.',
     inputSchema: {
       type: 'object',
       properties: {
         company_code: { type: 'string' },
-        from: { type: 'string', description: 'Optional lead doorplate' },
+        from: { type: 'string', description: 'Required lead doorplate' },
       },
-      required: ['company_code'],
+      required: ['company_code', 'from'],
     },
   },
   {
     name: 'teams_company_resume',
-    description: '公司重开（resume）：suspended→active。Muse 重启心跳。Keywords: resume, 重开, 公司重开.',
+    description: '公司重开（resume）：suspended→active。须 from=本公司 lead。Muse 重启心跳。Keywords: resume, 重开, 公司重开.',
     inputSchema: {
       type: 'object',
       properties: {
         company_code: { type: 'string' },
-        from: { type: 'string' },
+        from: { type: 'string', description: 'Required lead doorplate' },
       },
-      required: ['company_code'],
+      required: ['company_code', 'from'],
     },
   },
   {
     name: 'teams_company_archive',
-    description: '公司注销（archive）：终端态，不可重开。走 prompt 渠道擦除 Muse 痕迹；Teams 擦除数据。Keywords: archive, 注销, 公司注销.',
+    description: '公司注销（archive）：终端态，不可重开。须 from=本公司 lead。走 prompt 渠道擦除 Muse 痕迹；Teams 擦除数据。Keywords: archive, 注销, 公司注销.',
     inputSchema: {
       type: 'object',
       properties: {
         company_code: { type: 'string' },
-        from: { type: 'string' },
+        from: { type: 'string', description: 'Required lead doorplate' },
       },
-      required: ['company_code'],
+      required: ['company_code', 'from'],
     },
   },
 ];
@@ -901,6 +931,82 @@ super(message);
 this.status = status;
 this.extra = extra;
 }
+}
+
+/** Gate work when company is suspended/archived. suspended→403, archived→409. */
+function assertCompanyActiveStatus(status, code, verb) {
+  const st = status || COMPANY_STATUS_ACTIVE;
+  const c = code || "?";
+  const v = verb || "操作";
+  if (st === COMPANY_STATUS_ARCHIVED) {
+    throw new HttpError(409, `公司已注销，无法${v}`, { company_status: st, company_code: c });
+  }
+  if (st === COMPANY_STATUS_SUSPENDED) {
+    throw new HttpError(403, `公司已休眠，无法${v}`, { company_status: st, company_code: c });
+  }
+  return st;
+}
+
+async function edgeGetCompanyStatus(db, code) {
+  if (!db || !code) return null;
+  await ensureD1Schema(db);
+  const row = await d1First(db, "SELECT code, name, status, suspended_at, archived_at FROM companies WHERE code = ?", String(code).trim().toUpperCase());
+  return row || null;
+}
+
+async function edgeAssertCompanyActive(db, code, verb) {
+  const row = await edgeGetCompanyStatus(db, code);
+  if (!row) throw new HttpError(404, `公司码不存在: ${code}`);
+  assertCompanyActiveStatus(row.status, row.code, verb);
+  return row;
+}
+
+/** Lead auth for edge lifecycle. Missing from → 403. Empty roster: from recorded as operator. */
+async function edgeRequireLead(db, code, from) {
+  if (!from || !String(from).trim()) {
+    throw new HttpError(403, "需要 from（本公司 lead 门牌号）");
+  }
+  const doorplate = String(from).trim();
+  const agents = await d1All(db,
+    "SELECT doorplate, role, created_at FROM agents WHERE company_code = ? ORDER BY created_at ASC",
+    String(code).trim().toUpperCase()
+  );
+  if (!agents.length) {
+    return { doorplate, role: "operator", empty: true };
+  }
+  const lead = agents.find((a) => a.role === "lead") || agents[0];
+  if (doorplate !== lead.doorplate) {
+    throw new HttpError(403, `${doorplate} 不是本公司 lead，无权操作`);
+  }
+  return lead;
+}
+
+async function edgeNotifyLifecycleReceipts(db, code, type, from, body) {
+  if (!db || !code || !type) return [];
+  const agents = await d1All(db,
+    "SELECT doorplate, role FROM agents WHERE company_code = ? ORDER BY created_at ASC",
+    String(code).trim().toUpperCase()
+  );
+  const leads = agents.filter((a) => a.role === "lead");
+  const targets = leads.length ? leads : (agents.length ? [agents[0]] : []);
+  // Always include from so archive receipt survives wipe of other agents
+  const seen = new Set();
+  const out = [];
+  const pushTo = async (to) => {
+    if (!to || seen.has(to)) return;
+    seen.add(to);
+    out.push(await edgePushReceipt(db, {
+      type,
+      company: code,
+      to,
+      from: from || null,
+      ref: { company_code: code },
+      body: body || {},
+    }));
+  };
+  for (const a of targets) await pushTo(a.doorplate);
+  if (from) await pushTo(from);
+  return out;
 }
 
 // Standalone invite prompt builder — no DO state needed, served at edge.
@@ -1159,15 +1265,25 @@ if (!lead) throw new HttpError(400, `公司 ${company} 暂无成员`);
 return lead;
 }
 
-// 校验 from 是本公司的 lead。非 lead 403。
+// 校验 from 是本公司的 lead。缺 from / 非 lead → 403。空公司壳允许 from 作为 operator 审计标记。
 _requireLead(s, from, company_code) {
 const company = this._requireCompanyCode(s, company_code);
-if (!from) throw new HttpError(400, "需要 from（发起人门牌号）");
+if (!from || !String(from).trim()) throw new HttpError(403, "需要 from（本公司 lead 门牌号）");
+const members = Object.values(s.agents || {}).filter((a) => a.company === company);
+if (!members.length) {
+  return { doorplate: String(from).trim(), company, role: "operator", empty: true };
+}
 const f = this._requireAgent(s, from);
 if (f.company !== company) throw new HttpError(403, "只能由本公司 lead 发起");
 const lead = this._leadOf(s, company);
 if (f.doorplate !== lead.doorplate) throw new HttpError(403, `${from} 不是本公司 lead，无权操作`);
 return f;
+}
+
+_assertCompanyActive(s, company_code, verb) {
+  const company = this._requireCompany(s, company_code);
+  assertCompanyActiveStatus(company.status, company.code, verb);
+  return company;
 }
 
 // 从 doorplate 或 company_code 解析出公司身份（MCP / 无 agent 上下文调用用）
@@ -1402,10 +1518,23 @@ _wipeCompanyTraces(s, company_code) {
   for (const dp of Object.keys(s.agents || {})) {
     if (s.agents[dp].company === code) {
       removed_agents.push(dp);
-      delete s.agents[dp];
-      delete s.mailbox[dp];
-      delete s.receipts[dp];
     }
+  }
+  // P1: release cross-company claims owned by wiped agents (mirror _deleteAgent)
+  const released_claims = [];
+  for (const t of Object.values(s.tasks || {})) {
+    if (t.owner && removed_agents.includes(t.owner) && t.status === "claimed") {
+      t.owner = null;
+      t.status = "pending";
+      t.claimed_at = null;
+      t.claim_company = null;
+      released_claims.push(t.id);
+    }
+  }
+  for (const dp of removed_agents) {
+    delete s.agents[dp];
+    delete s.mailbox[dp];
+    delete s.receipts[dp];
   }
   const removed_tasks = [];
   for (const id of Object.keys(s.tasks || {})) {
@@ -1426,16 +1555,18 @@ _wipeCompanyTraces(s, company_code) {
     agents: removed_agents,
     tasks: removed_tasks,
     invites: removed_invites,
+    released_claims,
     agents_count: removed_agents.length,
     tasks_count: removed_tasks.length,
     invites_count: removed_invites.length,
+    released_claims_count: released_claims.length,
   };
 }
 
 /** 公司休眠：active → suspended（可逆） */
 _suspendCompany(s, company_code, from, base) {
   const company = this._requireCompany(s, company_code);
-  if (from) this._requireLead(s, from, company.code);
+  this._requireLead(s, from, company.code);
   const st = company.status || COMPANY_STATUS_ACTIVE;
   if (st === COMPANY_STATUS_ARCHIVED) {
     throw new HttpError(409, "公司已注销，不可休眠", { company_status: COMPANY_STATUS_ARCHIVED });
@@ -1478,7 +1609,7 @@ _suspendCompany(s, company_code, from, base) {
 /** 公司重开：suspended → active */
 _resumeCompany(s, company_code, from, base) {
   const company = this._requireCompany(s, company_code);
-  if (from) this._requireLead(s, from, company.code);
+  this._requireLead(s, from, company.code);
   const st = company.status || COMPANY_STATUS_ACTIVE;
   if (st === COMPANY_STATUS_ARCHIVED) {
     throw new HttpError(409, "公司已注销，不可重开（终端态）", { company_status: COMPANY_STATUS_ARCHIVED, reopen: false });
@@ -1518,7 +1649,7 @@ _resumeCompany(s, company_code, from, base) {
 /** 公司注销：→ archived（终端，擦除 Teams 痕迹 + 返回 Muse wipe prompt） */
 _archiveCompany(s, company_code, from, base) {
   const company = this._requireCompany(s, company_code);
-  if (from) this._requireLead(s, from, company.code);
+  this._requireLead(s, from, company.code);
   const st = company.status || COMPANY_STATUS_ACTIVE;
   if (st === COMPANY_STATUS_ARCHIVED) {
     throw new HttpError(409, "公司已注销", { company_status: COMPANY_STATUS_ARCHIVED, reopen: false });
@@ -1576,7 +1707,7 @@ return this._pubCompany(this._requireCompany(s, code));
 
 // ---------- invites（代企业入驻 token；渠道投递在独立 invite-mcp）----------
 _createInvite(s, { company_code, role, specialties, tags, from, target_hint, note}, base) {
-const company = this._requireCompany(s, company_code);
+const company = this._assertCompanyActive(s, company_code, "创建邀请");
 if (from) this._requireAgentInCompany(s, from, company.code);
 s.inviteSeq = (s.inviteSeq || 0) + 1;
 const invite_id = "INV-" + s.inviteSeq + "-" + Array.from({ length: 4}, () => COMPANY_ALPHABET[Math.floor(Math.random() * COMPANY_ALPHABET.length)]).join("");
@@ -1622,6 +1753,7 @@ _redeemInvite(s, invite_id, agentFields) {
 const inv = s.invites && s.invites[invite_id];
 if (!inv) throw new HttpError(404, `unknown invite: ${invite_id}`);
 if (inv.status !== "pending") throw new HttpError(409, `invite ${invite_id} already ${inv.status}`);
+this._assertCompanyActive(s, inv.company_code, "兑付邀请入职");
 const tags = [
   ...(Array.isArray(inv.specialties) ? inv.specialties : []),
   ...(Array.isArray(agentFields && agentFields.tags) ? agentFields.tags : []),
@@ -1675,7 +1807,7 @@ if (invite_id) {
 const preset = role && ROLE_PRESETS[role]? ROLE_PRESETS[role]: null;
 let company;
 if (company_code && String(company_code).trim()) {
-company = this._requireCompany(s, company_code);
+company = this._assertCompanyActive(s, company_code, "入驻/注册");
 } else {
 // 创始流程：自动创建新公司
 const code = this._genCompanyCode(s);
@@ -1687,6 +1819,10 @@ name: foundedName,
 created_at: now(),
 intro: "",
 tags: [],
+status: COMPANY_STATUS_ACTIVE,
+suspended_at: null,
+resumed_at: null,
+archived_at: null,
 };
 s.companies[code] = company;
 s.feeds[code] = [];
@@ -1825,7 +1961,7 @@ meta: row.meta && typeof row.meta === "object" ? row.meta : {},
 });
 }
 _createTask(s, { title, desc, priority, deps, acceptance, company_code, task_type, prompts}) {
-const company = this._requireCompany(s, company_code).code;
+const company = this._assertCompanyActive(s, company_code, "发单").code;
 const pri = (priority || "P1").toUpperCase();
 if (!["P0", "P1", "P2"].includes(pri))
 throw new HttpError(400, "priority must be P0/P1/P2");
@@ -1959,7 +2095,9 @@ return buildTaskTraceFromPub(this._enrichTask(s, t));
 
 _claim(s, id, doorplate, company_code) {
 const company = this._requireCompanyCode(s, company_code);
+this._assertCompanyActive(s, company, "抢单");
 const t = this._requireTask(s, id);
+this._assertCompanyActive(s, t.company, "抢单（发单方公司）");
 const a = this._requireAgent(s, doorplate);
 // Agent must authenticate as their own company; task may belong to any company (cross-company claim OK).
 if (a.company!== company) throw new HttpError(403, `${doorplate} 不属于公司 ${company}，不能认领`);
@@ -2444,38 +2582,38 @@ required: ["invite_id", "name"]
 },
 {
 name: "teams_company_suspend",
-description: "公司休眠（suspend）: active→suspended. Reversible via teams_company_resume. Muse: stop heartbeat, wind down, keep data, add 「待唤醒」timer. Product copy: 公司休眠/公司重开. Keywords: suspend, 休眠, 公司休眠.",
+description: "公司休眠（suspend）: active→suspended. Requires from=lead. Reversible via teams_company_resume. Muse: stop heartbeat, wind down, keep data, add 「待唤醒」timer. Product copy: 公司休眠/公司重开. Keywords: suspend, 休眠, 公司休眠.",
 inputSchema: {
 type: "object",
 properties: {
 company_code: { type: "string"},
-from: { type: "string", description: "Optional lead doorplate"}
+from: { type: "string", description: "Required lead doorplate"}
 },
-required: ["company_code"]
+required: ["company_code", "from"]
 }
 },
 {
 name: "teams_company_resume",
-description: "公司重开（resume）: suspended→active. Muse: cancel 待唤醒, restart heartbeat. Archived companies cannot resume. Keywords: resume, 重开, 公司重开.",
+description: "公司重开（resume）: suspended→active. Requires from=lead. Muse: cancel 待唤醒, restart heartbeat. Archived companies cannot resume. Keywords: resume, 重开, 公司重开.",
 inputSchema: {
 type: "object",
 properties: {
 company_code: { type: "string"},
-from: { type: "string"}
+from: { type: "string", description: "Required lead doorplate"}
 },
-required: ["company_code"]
+required: ["company_code", "from"]
 }
 },
 {
 name: "teams_company_archive",
-description: "公司注销（archive）: terminal wipe. Returns prompt for invite-mcp delivery to logged-in Muse lanes; Teams clears members/tasks/timers data. No reopen. Keywords: archive, 注销, 公司注销.",
+description: "公司注销（archive）: terminal wipe. Requires from=lead. Returns prompt for invite-mcp delivery to logged-in Muse lanes; Teams clears members/tasks/timers data. No reopen. Keywords: archive, 注销, 公司注销.",
 inputSchema: {
 type: "object",
 properties: {
 company_code: { type: "string"},
-from: { type: "string"}
+from: { type: "string", description: "Required lead doorplate"}
 },
-required: ["company_code"]
+required: ["company_code", "from"]
 }
 },
 {
@@ -2598,7 +2736,7 @@ const companyOf = (b) => (b && b.company_code) || query.get("company");
 
 // GET /api/health
 if (method === "GET" && r.length === 1 && r[0] === "health")
-return json({ ok: true, do_version: "2026-10-15-company-lifecycle-v1", has_task_trace: typeof this._taskTrace === "function", has_receipts: true, has_invites: true});
+return json({ ok: true, do_version: "2026-10-15-company-lifecycle-v2-enforce", has_task_trace: typeof this._taskTrace === "function", has_receipts: true, has_invites: true});
 
 // GET /api/invite?role=&company=
 if (method === "GET" && r.length === 1 && r[0] === "invite") {
@@ -2797,7 +2935,7 @@ return new Response(null, { status: 204, headers: {...CORS_HEADERS}});
 const url = new URL(request.url);
 // 边缘探针：不进 DO，确认 Worker 新版本已生效
 if (url.pathname === "/api/version-probe")
-return json({ edge_version: "2026-10-15-company-lifecycle-v1", ok: true, feature: "company_lifecycle_suspend_archive" });
+return json({ edge_version: "2026-10-15-company-lifecycle-v2-enforce", ok: true, feature: "company_lifecycle_suspend_archive" });
 const id = env.TASK_QUEUE.idFromName("main");
 const stub = env.TASK_QUEUE.get(id);
 const base = `${url.protocol}//${url.host}`;
@@ -2984,6 +3122,8 @@ if (body && body.method === "tools/call" && body.params && EDGE_NEW_TOOLS.some((
     } else if (name === "teams_company_suspend" || name === "teams_company_resume" || name === "teams_company_archive") {
       const code = String(args.company_code || "").trim().toUpperCase();
       if (!code) throw new HttpError(400, "company_code required");
+      const from = args.from;
+      await edgeRequireLead(env.DB, code, from);
       const action = name === "teams_company_suspend" ? "suspend" : name === "teams_company_resume" ? "resume" : "archive";
       await ensureD1Schema(env.DB);
       const co = await d1First(env.DB, "SELECT code, name, created_at, intro, tags, status, suspended_at, archived_at FROM companies WHERE code = ?", code);
@@ -2992,6 +3132,7 @@ if (body && body.method === "tools/call" && body.params && EDGE_NEW_TOOLS.some((
       let tags = [];
       try { tags = co.tags ? JSON.parse(co.tags) : []; } catch (_) { tags = []; }
       const companyObj = { code: co.code, name: co.name, status: cur, suspended_at: co.suspended_at || null, archived_at: co.archived_at || null, created_at: co.created_at, intro: co.intro || "", tags };
+      const receiptType = action === "suspend" ? "company_suspend" : action === "resume" ? "company_resume" : "company_archive";
       if (action === "suspend") {
         if (cur === COMPANY_STATUS_ARCHIVED) throw new HttpError(409, "公司已注销，不可休眠");
         const suspended_at = cur === COMPANY_STATUS_SUSPENDED ? (co.suspended_at || now()) : now();
@@ -3005,11 +3146,27 @@ if (body && body.method === "tools/call" && body.params && EDGE_NEW_TOOLS.some((
         out = { ok: true, company: companyObj, status: COMPANY_STATUS_ACTIVE, label: "公司重开", muse_action: { restart_heartbeat: true, cancel_pending_wake: true, product_copy: "公司重开" }, prompt: buildResumePrompt(base, companyObj), channel: "detect_via_renew_or_get", edge: true };
       } else {
         if (cur === COMPANY_STATUS_ARCHIVED) throw new HttpError(409, "公司已注销");
+        try {
+          await edgeNotifyLifecycleReceipts(env.DB, code, "company_archive", from, { status: COMPANY_STATUS_ARCHIVED, label: "公司注销", terminal: true });
+        } catch (_) {}
         const archived_at = now();
         try { await dbBatchDeleteCompany(env.DB, code); } catch (_) {}
         await d1Run(env.DB, "UPDATE companies SET status = ?, archived_at = ?, intro = ?, tags = ? WHERE code = ?", COMPANY_STATUS_ARCHIVED, archived_at, "", "[]", code);
         companyObj.status = COMPANY_STATUS_ARCHIVED; companyObj.archived_at = archived_at; companyObj.intro = ""; companyObj.tags = [];
         out = { ok: true, company: companyObj, status: COMPANY_STATUS_ARCHIVED, label: "公司注销", terminal: true, reopen: false, muse_action: { full_wipe: true, stop_heartbeat: true, delete_timers: true, delete_local_traces: true, reopen: false, product_copy: "公司注销" }, prompt: buildArchiveWipePrompt(base, companyObj), channel: "prompt", edge: true };
+      }
+      if (action !== "archive") {
+        try {
+          await edgeNotifyLifecycleReceipts(env.DB, code, receiptType, from, { status: out.status, label: out.label });
+        } catch (_) {}
+      }
+      try {
+        await withTimeout(stub.fetch(new Request(`${base}/api/companies/${encodeURIComponent(code)}/${action}`, {
+          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ from }),
+        })), 2500);
+        out.do_synced = true;
+      } catch (_) {
+        out.do_synced = false;
       }
     } else {
       throw new HttpError(404, `unknown tool: ${name}`);
@@ -3018,6 +3175,41 @@ if (body && body.method === "tools/call" && body.params && EDGE_NEW_TOOLS.some((
   } catch (e) {
     const msg = e && e.message ? e.message : String(e);
     return json({ jsonrpc: "2.0", id: rpcId, error: { code: -32602, message: msg } });
+  }
+}
+
+// Edge status gate for busy-path tools (sticky DO may not know D1 lifecycle yet)
+if (body && body.method === "tools/call" && body.params) {
+  const tname = body.params.name;
+  const targs = body.params.arguments || {};
+  try {
+    if (tname === "teams_claim") {
+      const claimerCo = String(targs.company_code || "").trim().toUpperCase();
+      if (claimerCo) await edgeAssertCompanyActive(env.DB, claimerCo, "抢单");
+      if (targs.task_id) {
+        try {
+          const tres = await withTimeout(stub.fetch(new Request(`${base}/api/tasks/${encodeURIComponent(targs.task_id)}`, { method: "GET" })), 2000);
+          const td = await tres.json().catch(() => null);
+          if (tres.ok && td && td.company) await edgeAssertCompanyActive(env.DB, td.company, "抢单（发单方公司）");
+        } catch (ge) { if (ge instanceof HttpError) throw ge; }
+      }
+    } else if (tname === "teams_create_task") {
+      const code = String(targs.company_code || "").trim().toUpperCase();
+      if (code) await edgeAssertCompanyActive(env.DB, code, "发单");
+    } else if (tname === "teams_register") {
+      const code = String(targs.company_code || "").trim().toUpperCase();
+      if (code) await edgeAssertCompanyActive(env.DB, code, "入驻/注册");
+    } else if (tname === "teams_redeem_invite" && targs.invite_id) {
+      // edge redeem path already gates; when falling through, check invite company
+      try {
+        const inv = await edgeGetInvite(env.DB, targs.invite_id);
+        await edgeAssertCompanyActive(env.DB, inv.company_code, "兑付邀请入职");
+      } catch (ge) { if (ge instanceof HttpError) throw ge; }
+    }
+  } catch (e) {
+    if (e instanceof HttpError) {
+      return json({ jsonrpc: "2.0", id: rpcId, error: { code: -32602, message: e.message } });
+    }
   }
 }
 
@@ -3132,7 +3324,7 @@ try {
     }
   }
 
-  // Company lifecycle: edge-first D1 only (never touch sticky/hung DO)
+  // Company lifecycle: edge-first D1 + lead auth + receipts + best-effort DO sync
   {
     const m = url.pathname.match(/^\/api\/companies\/([^/]+)\/(suspend|resume|archive)$/);
     if (method === "POST" && m) {
@@ -3141,7 +3333,9 @@ try {
         try { body = await request.json(); } catch (_) { body = {}; }
         const code = decodeURIComponent(m[1]).toUpperCase();
         const action = m[2];
+        const from = body && body.from;
         await ensureD1Schema(env.DB);
+        await edgeRequireLead(env.DB, code, from);
         let co = await d1First(env.DB, "SELECT code, name, created_at, intro, tags, status, suspended_at, archived_at FROM companies WHERE code = ?", code);
         if (!co) {
           return json({ ok: false, error: `公司码不存在: ${code}` }, 404);
@@ -3155,6 +3349,7 @@ try {
           created_at: co.created_at, intro: co.intro || "", tags,
         };
         let out;
+        const receiptType = action === "suspend" ? "company_suspend" : action === "resume" ? "company_resume" : "company_archive";
         if (action === "suspend") {
           if (cur === COMPANY_STATUS_ARCHIVED) {
             return json({ ok: false, error: "公司已注销，不可休眠", company_status: COMPANY_STATUS_ARCHIVED }, 409);
@@ -3182,7 +3377,7 @@ try {
           await d1Run(env.DB, "UPDATE companies SET status = ?, suspended_at = ? WHERE code = ?", COMPANY_STATUS_ACTIVE, 0, code);
           companyObj.status = COMPANY_STATUS_ACTIVE;
           companyObj.resumed_at = now();
-          companyObj.suspended_at = null; // D1 stores 0
+          companyObj.suspended_at = null;
           out = {
             ok: true, already: cur === COMPANY_STATUS_ACTIVE, company: companyObj,
             status: COMPANY_STATUS_ACTIVE, label: "公司重开",
@@ -3191,10 +3386,15 @@ try {
             channel: "detect_via_renew_or_get", edge: true,
           };
         } else {
-          // archive
           if (cur === COMPANY_STATUS_ARCHIVED) {
             return json({ ok: false, error: "公司已注销", company_status: COMPANY_STATUS_ARCHIVED, reopen: false }, 409);
           }
+          // Receipts before wipe so leads (and from) get company_archive
+          try {
+            await edgeNotifyLifecycleReceipts(env.DB, code, "company_archive", from, {
+              status: COMPANY_STATUS_ARCHIVED, label: "公司注销", terminal: true,
+            });
+          } catch (re) { console.error("edge archive receipt", re && re.message); }
           const archived_at = now();
           try { await dbBatchDeleteCompany(env.DB, code); } catch (we) { console.error("edge archive wipe", we && we.message); }
           await d1Run(env.DB, "UPDATE companies SET status = ?, archived_at = ?, intro = ?, tags = ? WHERE code = ?", COMPANY_STATUS_ARCHIVED, archived_at, "", "[]", code);
@@ -3215,10 +3415,29 @@ try {
             note: "必须经 invite-mcp 向当前已登录 Muse lane 投递 prompt。",
           };
         }
-        // DO sync deferred: syncStateToD1 preserves higher-rank D1 lifecycle status.
+        if (action !== "archive") {
+          try {
+            await edgeNotifyLifecycleReceipts(env.DB, code, receiptType, from, {
+              status: out.status, label: out.label,
+            });
+          } catch (re) { console.error("edge lifecycle receipt", re && re.message); }
+        }
+        // Best-effort: push same lifecycle into sticky DO so busy path sees status
+        try {
+          await withTimeout(stub.fetch(new Request(`${base}/api/companies/${encodeURIComponent(code)}/${action}`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ from }),
+          })), 2500);
+          out.do_synced = true;
+        } catch (_) {
+          out.do_synced = false;
+          out.do_sync_note = "sticky DO sync timed out; D1 status + edge gates still enforce";
+        }
         return json(out);
       } catch (le) {
-        return json({ ok: false, error: (le && le.message) || String(le), edge: true }, 500);
+        const st = (le && le.status) || 500;
+        return json({ ok: false, error: (le && le.message) || String(le), ...(le && le.extra ? le.extra : {}), edge: true }, st);
       }
     }
   }
@@ -3285,6 +3504,45 @@ try {
     }
   }
 
+  // Edge gates: suspend/archive block claim / createTask / register(join)
+  if (url.pathname === "/api/tasks" && method === "POST") {
+    let body = null;
+    try { body = await request.json(); } catch (_) { body = {}; }
+    const code = (body && body.company_code) ? String(body.company_code).trim().toUpperCase() : "";
+    if (code) {
+      try { await edgeAssertCompanyActive(env.DB, code, "发单"); }
+      catch (e) {
+        if (e instanceof HttpError) return json({ ok: false, error: e.message, ...(e.extra || {}) }, e.status);
+        throw e;
+      }
+    }
+    const res = await stub.fetch(new Request(request.url, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}),
+    }));
+    let data = null;
+    try { data = await res.json(); } catch (_) {}
+    return json(data, res.status);
+  }
+  if (url.pathname === "/api/agents/register" && method === "POST") {
+    let body = null;
+    try { body = await request.json(); } catch (_) { body = {}; }
+    const code = (body && body.company_code) ? String(body.company_code).trim().toUpperCase() : "";
+    // Only gate join; founding (no company_code) stays allowed
+    if (code) {
+      try { await edgeAssertCompanyActive(env.DB, code, "入驻/注册"); }
+      catch (e) {
+        if (e instanceof HttpError) return json({ ok: false, error: e.message, ...(e.extra || {}) }, e.status);
+        throw e;
+      }
+    }
+    const res = await stub.fetch(new Request(request.url, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}),
+    }));
+    let data = null;
+    try { data = await res.json(); } catch (_) {}
+    return json(data, res.status);
+  }
+
   // Wrap claim/submit/review/broadcast to emit edge receipts
   {
     const m = url.pathname.match(/^\/api\/tasks\/([^/]+)\/(claim|submit|review)$/);
@@ -3293,6 +3551,23 @@ try {
       const action = m[2];
       let body = null;
       try { body = await request.json(); } catch (_) { body = {}; }
+      if (action === "claim") {
+        const claimerCo = (body && body.company_code) ? String(body.company_code).trim().toUpperCase() : "";
+        try {
+          if (claimerCo) await edgeAssertCompanyActive(env.DB, claimerCo, "抢单");
+          // Also block claiming tasks owned by suspended/archived publisher when we can resolve from DO/D1
+          try {
+            const tres = await withTimeout(stub.fetch(new Request(`${base}/api/tasks/${encodeURIComponent(taskId)}`, { method: "GET" })), 2000);
+            const td = await tres.json().catch(() => null);
+            if (tres.ok && td && td.company) await edgeAssertCompanyActive(env.DB, td.company, "抢单（发单方公司）");
+          } catch (ge) {
+            if (ge instanceof HttpError) throw ge;
+          }
+        } catch (e) {
+          if (e instanceof HttpError) return json({ ok: false, error: e.message, ...(e.extra || {}) }, e.status);
+          throw e;
+        }
+      }
       const res = await stub.fetch(new Request(request.url, {
         method: "POST",
         headers: { "content-type": "application/json" },
